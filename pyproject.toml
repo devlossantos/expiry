@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "expiry"
+version = "1.0.0"
+description = "Track expiring secrets, certificates and anything else - with Entra ID + SSL sync and email reminders."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "click>=8.1",
+  "rich>=13.7",
+  "PyYAML>=6.0",
+  "Jinja2>=3.1",
+  "msal>=1.35",
+  "requests>=2.31",
+  "APScheduler>=3.10,<4",
+  "cryptography>=42",
+  "tzdata",
+]
+
+[project.urls]
+Homepage = "https://github.com/devlossantos/expiry"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+expiry = "expiry.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+expiry = ["templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

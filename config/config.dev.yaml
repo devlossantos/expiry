@@ -1,0 +1,58 @@
+# Local test configuration used by docker-compose.dev.yml (public: no private data here).
+# Email is off until you set it up: see the email: section (Microsoft Graph, like production).
+#
+# To use your own settings without committing them: copy this file to
+# config/config.local.yaml (git-ignored) and put EXPIRY_DEV_CONFIG=config.local.yaml
+# in a .env file next to docker-compose.dev.yml (also git-ignored).
+timezone: Europe/Dublin
+# timezone: UTC
+# timezone: America/New_York
+
+date_format: "%d/%m/%Y"        # Irish: 31/12/2026
+# date_format: "%Y-%m-%d"      # ISO:   2026-12-31
+# date_format: "%d %b %Y"      # long:  31 Dec 2026
+
+database: /data/expiry.db
+
+schedule:
+  sync: "*/30 * * * *"
+  check: "*/5 * * * *"      # check every 5 minutes so you see results quickly
+  run_on_start: true
+
+notify:
+  days_before: [30, 14, 1]
+  on_expiry_day: true
+  mode: individual
+  emails:
+    - you@example.com       # who receives test reminders
+
+email:
+  # Off until configured; meanwhile preview what would be sent with `expiry check --dry-run`.
+  # To send real test emails through Microsoft 365 (same as production, README "Send email
+  # through Microsoft 365"): put ENTRA_* in config/expiry.env, set the sender mailbox below and
+  # enabled: true - ideally in your git-ignored config/config.local.yaml, not in this public file.
+  enabled: false
+  transport: graph
+  graph:
+    sender: expiry@example.com   # a mailbox the Entra app may send as (Mail.Send)
+
+entra:
+  tenant_id: ${ENTRA_TENANT_ID}
+  client_id: ${ENTRA_CLIENT_ID}
+  client_secret: ${ENTRA_CLIENT_SECRET}
+
+sources:
+  entra:
+    enabled: false          # true once ENTRA_* are set in config/expiry.env
+  ssl:
+    enabled: true
+    hosts:
+      - github.com
+      - expired.badssl.com  # a public test site with an already-expired certificate
+      # - example.com:8443            # domain on another port
+      # - 203.0.113.10                # IP address (port 443)
+      # - 203.0.113.10:8443           # IP address + port
+      # - "[2001:db8::10]:443"        # IPv6 needs brackets + quotes
+      # - host: 203.0.113.10          # IP that serves several sites: ask for one by name (SNI)
+      #   sni: portal.example.com
+      #   name: "Portal VIP"

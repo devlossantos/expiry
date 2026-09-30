@@ -1,0 +1,335 @@
+.TH EXPIRY 1 "2026-09-30" "expiry 1.0.0" "User Commands"
+.SH NAME
+expiry \- track expiring secrets, certificates and anything else, with email reminders
+.SH SYNOPSIS
+.B expiry
+.RI [ \-c " FILE" ]
+.I COMMAND
+.RI [ ARGS ...]
+.br
+.B expiry
+.RB [ \-h | \-\-help | \-V | \-\-version ]
+.SH DESCRIPTION
+.B expiry
+keeps a list of
+.I reminders
+\(em things that expire: application secrets, certificates, licenses, domains, tokens.
+Each reminder has a name, an expiry date, the number of days left and optional notes.
+.PP
+A background service (the Docker container) keeps the list up to date and sends
+notifications
+.B 30 days, 14 days and 1 day
+before each expiry date, plus on the expiry day itself (all configurable).
+Reminders are created in three ways:
+.IP \(bu 3
+.B Manually
+with
+.BR "expiry add" .
+.IP \(bu 3
+.B Entra ID
+(Azure AD): client secrets and certificates of every app registration (and optionally
+enterprise applications) are imported automatically by
+.BR "expiry sync" .
+.IP \(bu 3
+.B SSL/TLS
+certificates: the certificate served by a domain or IP is read directly from the
+server, see
+.BR "expiry ssl" .
+.PP
+On the server, the
+.B expiry
+command is a small wrapper that runs the CLI inside the
+.I expiry
+container with
+.BR "docker exec" ,
+so every command below works the same when connected over SSH.
+.SH DATES
+Wherever a DATE is expected you can use the configured
+.I date_format
+(default
+.BR DD/MM/YYYY ,
+e.g. 31/03/2027),
+.BR YYYY\-MM\-DD ,
+or a date relative to today:
+.BR +30d ", " +2w ", " +6m ", " +1y .
+Dates are displayed in
+.I date_format
+and in the configured
+.I timezone
+(e.g. Europe/Dublin); JSON and export output always use YYYY\-MM\-DD.
+.SH REMINDER COMMANDS
+.TP
+.BR "list " "[" \-a "] [" \-s " SOURCE] [" \-w " DAYS] [" \-e "] [" \-q " TEXT] [" \-\-json ]
+List active reminders, soonest first, with the days left (color coded).
+.B \-a
+also shows archived/ignored ones,
+.B \-s
+filters by source
+.RB ( manual ", " entra ", " ssl ),
+.B \-w
+shows only items expiring within DAYS days,
+.B \-e
+only expired items,
+.B \-q
+searches name and notes. Alias:
+.BR ls .
+.TP
+.BR "add " "NAME DATE [NOTES...] [" \-n " TEXT] [" \-\-notify " EMAIL] [" \-\-mute ]
+Add a reminder. Everything after DATE is stored as notes (or use
+.BR \-n ).
+.B \-\-notify
+adds extra recipients for this reminder only (repeatable or comma separated).
+.TP
+.BR "show " ID " [" \-\-json ]
+Show every field of a reminder, its recipients, the notification schedule
+(sent / scheduled / skipped) and recent notifications.
+.TP
+.BR "edit " "ID [" \-\-name " N] [" \-d " DATE] [" \-n " NOTES] [" \-\-append\-note " T] [" \-\-notify " E] [" \-\-add\-notify " E] [" \-\-clear\-notify "] [" \-\-mute | \-\-unmute ]
+Edit a reminder. With no options it asks for each field interactively.
+Changing the date (a renewal) restarts the notification cycle.
+For synced reminders (entra, ssl) name and date are refreshed by the next sync;
+notes, recipients and mute are kept.
+.TP
+.BR "rm " "ID [ID...] [" \-y ]
+Remove reminders (asks for confirmation unless
+.BR \-y ).
+Manual reminders are deleted. Synced reminders are marked
+.I ignored
+so they are not re-imported. Aliases:
+.BR remove ", " delete .
+.TP
+.BR "restore " ID
+Re-activate an ignored or archived reminder.
+.SH SSL COMMANDS
+.TP
+.BR "ssl add " "HOST[:PORT]... [" \-\-sni " NAME] [" \-\-name " N] [" \-n " NOTES] [" \-f ]
+Start tracking the certificate served by one or more hosts (domain, IPv4, IPv6 or a URL;
+default port 443). Use
+.B \-\-sni
+when HOST is an IP but the server needs a host name to pick the certificate.
+The certificate is read immediately and a reminder is created; self-signed and
+expired certificates are supported.
+.B \-f
+adds the host even if it cannot be reached right now.
+.TP
+.BR "ssl list " [ \-\-json ]
+List tracked hosts with their reminder, expiry date, days left and issuer.
+.TP
+.BR "ssl rm " "TARGET|HOST[:PORT] [" \-\-sni " NAME]"
+Stop tracking a host (the reminder is archived).
+.TP
+.BR "ssl check " "HOST[:PORT] [" \-\-sni " NAME] [" \-\-json ]
+Inspect a certificate now without saving anything: subject, issuer, validity,
+days left, whether it is trusted, SANs, serial and fingerprint.
+.TP
+.BR "ssl discover " "DOMAIN [" \-\-add "] [" \-p " PORT] [" \-y ]
+Find host names under DOMAIN from public Certificate Transparency logs (crt.sh),
+connect to each one and show its certificate expiry.
+.B \-\-add
+starts tracking every reachable host that is not tracked yet.
+.TP
+.BR "ssl scan " "[" \-d " DOMAIN] [" \-n " NAME] [" \-\-names\-file " FILE|\-] [" \-\-network " CIDR] [" \-p " PORTS] [" \-\-wildcards "] [" \-\-add "] [" \-y ]
+Find where your certificates are installed, including wildcard certificates on several
+servers. Tries about 180 typical host names under each domain (plus \fB\-\-name\fR values,
+names from \fB\-\-names\-file\fR \(em a plain list or a Windows/BIND DNS export; \fB\-\fR reads
+stdin \(em and public names from certificate logs) using this server's DNS, optionally every
+address of the \fB\-\-network\fR ranges, on ports 443, 8443 and 9443 unless \fB\-\-ports\fR is
+given, and reads each server's certificate with a TLS handshake (nothing else is sent). Keeps certificates issued for the domains and groups them by certificate.
+.B \-\-add
+tracks the new locations. Defaults come from \fIsources.ssl.scan\fR, which also runs the
+scan on a schedule (\fIadd: true\fR tracks new finds automatically and emails a summary).
+Tell your network/security team before scanning networks.
+.SH SYNC AND NOTIFICATION COMMANDS
+.TP
+.BR "sync " "[" \-s " entra|ssl] [" \-\-dry\-run ]
+Pull expiry dates from the enabled sources now. New credentials become reminders,
+changed dates are updated, and credentials that no longer exist are archived.
+Runs automatically on the
+.I schedule.sync
+cron schedule.
+.TP
+.BR "check " [ \-\-dry\-run ]
+Send the notifications that are due now. Each stage is sent once per reminder and
+expiry date; failed deliveries are retried at the next check. Runs automatically on the
+.I schedule.check
+cron schedule.
+.TP
+.BR "test\-notify " "[" \-\-to " EMAIL] [" \-\-no\-email "] [" \-\-no\-webhooks ]
+Send a sample notification to verify email / webhook settings.
+.TP
+.BR "status " [ \-\-json ]
+Show whether the service is running, the schedule, last and next sync/check,
+enabled sources and channels, counts and configuration problems.
+.TP
+.BR "history " "[" \-i " ID] [" \-n " N] [" \-\-json ]
+Notifications sent or failed.
+.TP
+.BR "audit " "[" \-i " ID] [" \-n " N] [" \-\-json ]
+Change log: who added, edited or removed what (the SSH user name is recorded),
+and changes made by syncs. Alias:
+.BR log .
+.SH ADMIN COMMANDS
+.TP
+.BR "config show"
+Print the effective configuration with secrets masked.
+.TP
+.BR "config check " [ \-\-connect ]
+Validate the configuration;
+.B \-\-connect
+also signs in to Entra ID and verifies the Graph permission.
+.TP
+.BR "export " "[" \-f " json|csv] [" \-a "] [" \-o " FILE]"
+Export reminders (backup, spreadsheets).
+.TP
+.BR "import " "FILE|\-  [" \-\-dry\-run ]
+Import manual reminders from JSON (the export format) or CSV with a header
+.BR name,expires_on[,notes,notify,muted] .
+Existing name + date pairs are skipped.
+.TP
+.BR "backup create " "[" \-d " DIR]"
+Back up the database now (a consistent snapshot, safe while the service runs).
+The daemon does this automatically every night (\fIbackup.schedule\fR) and keeps
+the newest \fIbackup.keep\fR files.
+.TP
+.BR "backup list " "[" \-d " DIR]"
+List backups, newest first.
+.TP
+.BR "backup restore " "FILE [" \-y ]
+Replace the current data with a backup (a file name from \fBbackup list\fR or a path).
+The current database is saved first as \fIexpiry\-prerestore\-<time>.db\fR.
+.TP
+.BR "entra cert\-create " "[" \-\-path " FILE] [" \-\-days " N] [" \-f ]
+Create a private key and self\-signed certificate for signing in to Entra ID
+instead of a client secret. Writes \fI/data/entra\-auth.pem\fR (key + certificate,
+mode 600) and \fI/data/entra\-auth.crt\fR (public certificate to upload to the app
+registration). Then set \fIentra.certificate_path\fR.
+.TP
+.BR "entra cert\-show " "[" \-\-path " FILE] [" \-\-pem ]
+Show the login certificate's thumbprint and expiry;
+.B \-\-pem
+prints the public certificate.
+.TP
+.B daemon
+Run the scheduler in the foreground (the container's default command).
+.TP
+.B health
+Exit 0 when the daemon heartbeat is recent (Docker HEALTHCHECK).
+.TP
+.B install
+Copy the host wrapper, this man page and a starter configuration to the host
+(run through
+.BR "docker run" ,
+see INSTALLATION).
+.TP
+.BR "help " [ COMMAND ...]
+Show help;
+.B expiry COMMAND \-\-help
+works too.
+.SH NOTIFICATIONS
+Stages are taken from
+.I notify.days_before
+(default 30, 14, 1) plus the expiry day when
+.I notify.on_expiry_day
+is true. A reminder is due for the tightest stage it has reached; looser stages that
+were missed are skipped, so an item added with 5 days left gets one email, not three.
+Recipients are
+.I notify.emails
+plus the reminder's own
+.B \-\-notify
+addresses plus, for Entra apps with
+.IR sources.entra.notify_owners ,
+the app owners.
+In
+.I individual
+mode each item is emailed separately; in
+.I digest
+mode each recipient gets one email per run listing all their due items.
+Webhooks (Slack, Teams Workflows, generic JSON) get one message per run.
+.SH SELF\-MONITORING
+After every job the daemon checks its own health. When the Entra or SSL sync fails
+\fIalerts.sync_failures\fR times in a row (default 3), or a reminder could not be
+delivered, or a backup failed, an alert is sent to \fIalerts.emails\fR (default
+\fInotify.emails\fR) and to every webhook, repeated every \fIalerts.repeat_hours\fR
+(default 24) while it lasts, followed by a RESOLVED message. \fBexpiry status\fR shows
+the current health.
+.SH FILES
+.TP
+.I /etc/expiry/config.yaml
+Main configuration (mounted read-only into the container as
+.IR /config/config.yaml ).
+.TP
+.I /etc/expiry/expiry.env
+Secrets passed to the container with
+.BR \-\-env\-file ;
+referenced from the config as
+.IR ${NAME} .
+.TP
+.I /etc/expiry/templates/reminder.html.j2
+Copy of the default email template; set
+.I email.template_file
+to use a customized one.
+.TP
+.I expiry-data:/data/expiry.db
+SQLite database in the Docker volume
+.IR expiry\-data .
+.TP
+.I /var/backups/expiry
+Nightly backups when mounted at \fI/backups\fR (otherwise \fI/data/backups\fR).
+.TP
+.I expiry-data:/data/entra-auth.pem
+Entra login key + certificate created by \fBentra cert\-create\fR.
+.SH ENVIRONMENT
+.TP
+.B EXPIRY_CONFIG
+Config file path (default /config/config.yaml).
+.TP
+.B EXPIRY_DB
+Database path (overrides
+.IR database ).
+.TP
+.B EXPIRY_CONTAINER
+Container name used by the host wrapper (default expiry).
+.TP
+.B EXPIRY_DOCKER
+Docker command used by the host wrapper (default docker, e.g. "sudo docker" or podman).
+.SH INSTALLATION
+.nf
+docker run \-\-rm \-u 0 \e
+  \-v /usr/local/bin:/host/bin \e
+  \-v /usr/local/share/man/man1:/host/man \e
+  \-v /etc/expiry:/host/config \e
+  ghcr.io/devlossantos/expiry:latest install
+
+install \-d \-o 10001 \-g 10001 \-m 750 /var/backups/expiry
+
+docker run \-d \-\-name expiry \-\-restart unless\-stopped \e
+  \-\-log\-opt max\-size=10m \-\-log\-opt max\-file=5 \e
+  \-\-env\-file /etc/expiry/expiry.env \e
+  \-v /etc/expiry:/config:ro \-v expiry\-data:/data \e
+  \-v /var/backups/expiry:/backups ghcr.io/devlossantos/expiry:latest
+.fi
+.PP
+Users need access to Docker (member of the
+.I docker
+group, or use sudo) to run the wrapper.
+.SH EXAMPLES
+.nf
+expiry add "Payroll API cert" 31/03/2027 renew via DigiCert portal
+expiry add github\-pat +90d \-\-notify dev@example.com
+expiry list \-w 30
+expiry edit 7 \-\-date 31/03/2028
+expiry rm 7
+expiry ssl add example.com mail.example.com:993
+expiry ssl add 10.0.0.15 \-\-sni portal.example.com
+expiry ssl discover example.com \-\-add
+expiry sync \-\-dry\-run
+expiry check \-\-dry\-run
+expiry export \-f csv > reminders.csv
+expiry backup list
+expiry entra cert\-create
+.fi
+.SH EXIT STATUS
+0 on success, 1 on errors (e.g. a failed sync or notification), 2 on usage errors.
+.SH SEE ALSO
+.BR docker (1),
+.BR crontab (5)

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
+{#
+  Default expiry email template (Jinja2).
+  Variables:
+    items  - list of items (one element in "individual" mode, unless several servers share a certificate)
+    item   - shortcut for items[0]
+    certificate - set when all items are servers sharing one certificate:
+                  name, issuer, wildcard (true/false), servers (list of names)
+    count, today, version
+  Each item has: id, name, expires_on, expires_on_long, days_left, when, expired,
+                 severity (critical|warning|notice), stage, stage_label, notes, source, url, meta
+#}
+<body style="margin:0;padding:0;background:#f4f5f7;font-family:Segoe UI,Helvetica,Arial,sans-serif;color:#1f2328;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:24px 0;">
+<tr><td align="center">
+  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;">
+    <tr><td style="background:#1f2937;color:#ffffff;padding:18px 24px;font-size:18px;font-weight:600;">
+      Expiry reminder
+    </td></tr>
+    <tr><td style="padding:20px 24px 4px 24px;font-size:15px;line-height:1.5;">
+      {% if certificate %}
+        The {% if certificate.wildcard %}wildcard {% endif %}certificate <strong>{{ certificate.name }}</strong>
+        ({{ certificate.issuer }}) {% if item.expired %}has expired{% else %}expires <strong>{{ item.when }}</strong>{% endif %}
+        and is installed on <strong>{{ count }}</strong> servers. Renew it once, then install it on every server below.
+      {% elif count == 1 %}
+        <strong>{{ item.name }}</strong> {% if item.expired %}has expired{% else %}expires <strong>{{ item.when }}</strong>{% endif %}.
+      {% else %}
+        <strong>{{ count }}</strong> items are expiring soon or have expired.
+      {% endif %}
+    </td></tr>
+    {% for it in items %}
+    {% set color = {"critical": "#d1242f", "warning": "#d97706", "notice": "#2563eb"}[it.severity] %}
+    <tr><td style="padding:12px 24px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-left:4px solid {{ color }};border-radius:6px;">
+        <tr><td style="padding:12px 16px;font-size:14px;line-height:1.6;">
+          <div style="font-size:15px;font-weight:600;">{{ it.name }}</div>
+          <div><span style="color:#6b7280;">Expires:</span> {{ it.expires_on_long }}
+            &nbsp;<span style="color:{{ color }};font-weight:600;">({{ it.when }})</span></div>
+          {% if it.notes %}<div><span style="color:#6b7280;">Notes:</span> {{ it.notes }}</div>{% endif %}
+          <div style="color:#6b7280;font-size:12px;">ID {{ it.id }} &middot; source: {{ it.source }}{% if it.stage_label %} &middot; reminder: {{ it.stage_label }}{% endif %}</div>
+          {% if it.url %}<div style="margin-top:6px;"><a href="{{ it.url }}" style="color:#2563eb;">Open in portal</a></div>{% endif %}
+        </td></tr>
+      </table>
+    </td></tr>
+    {% endfor %}
+    <tr><td style="padding:16px 24px 22px 24px;font-size:12px;color:#6b7280;">
+      Manage reminders on the server: <code>expiry list</code>, <code>expiry edit &lt;id&gt;</code>, <code>expiry rm &lt;id&gt;</code>.<br>
+      Sent by expiry {{ version }} on {{ today }}.
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>

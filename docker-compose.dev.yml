@@ -1,0 +1,23 @@
+# Local test stack: builds the image from the source in this folder (tagged expiry:dev, never
+# published) and runs it with config/config.dev.yaml, or your own config/config.local.yaml.
+#
+#   docker compose -f docker-compose.dev.yml up -d --build
+#   docker exec -it expiry expiry list
+services:
+  expiry:
+    build: .
+    image: expiry:dev
+    container_name: expiry
+    restart: unless-stopped
+    env_file:
+      - path: ./config/expiry.env     # optional: ENTRA_* secrets for Entra sync and Graph email
+        required: false
+    environment:
+      # config.dev.yaml by default; set EXPIRY_DEV_CONFIG=config.local.yaml in .env for personal settings
+      EXPIRY_CONFIG: /config/${EXPIRY_DEV_CONFIG:-config.dev.yaml}
+    volumes:
+      - ./config:/config:ro
+      - expiry-dev-data:/data
+
+volumes:
+  expiry-dev-data:

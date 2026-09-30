@@ -1,0 +1,153 @@
+# =============================================================================
+#  expiry configuration   (mounted into the container at /config/config.yaml)
+#
+#  Values like ${NAME} are read from environment variables, so secrets can live
+#  in /etc/expiry/expiry.env (passed with --env-file) instead of this file.
+#  ${NAME:-default} uses "default" when NAME is empty/unset.
+#
+#  Most changes apply at the next scheduled run; changes to `schedule` or
+#  `timezone` need a restart:  docker restart expiry
+#  Validate with:  expiry config check --connect
+# =============================================================================
+
+# Timezone used for "days left", the schedule and log times (IANA name).
+timezone: Europe/Dublin
+# timezone: UTC
+# timezone: America/New_York
+
+# How dates are shown (list, emails, logs) and typed (expiry add NAME 31/12/2026).
+# YYYY-MM-DD and +90d style dates are always accepted too. JSON/CSV exports stay YYYY-MM-DD.
+date_format: "%d/%m/%Y"        # Irish: 31/12/2026
+# date_format: "%Y-%m-%d"      # ISO:   2026-12-31
+# date_format: "%d %b %Y"      # long:  31 Dec 2026
+
+# SQLite database (inside the container; /data is the persistent volume).
+database: /data/expiry.db
+
+schedule:
+  sync: "0 */6 * * *"     # cron: pull expiry dates from Entra / SSL every 6 hours
+  check: "0 8 * * *"      # cron: send due notifications every day at 08:00
+  run_on_start: true      # run a sync + check when the service starts
+
+# Automatic database backups (consistent snapshots, safe while running).
+# Recommended: keep them outside the data volume by mounting a host folder at /backups:
+#   docker run ... -v /var/backups/expiry:/backups ...   (they then go there automatically)
+backup:
+  enabled: true
+  schedule: "30 2 * * *"   # cron: daily at 02:30
+  directory: ""            # empty = /backups if mounted, else /data/backups
+  keep: 14                 # how many backups to keep (older ones are deleted)
+
+# Self-monitoring: tell someone when expiry ITSELF is broken (Entra login failing, emails not
+# being delivered, backups failing). Sent by email and to every webhook; repeated while the
+# problem lasts, plus a "resolved" message when it works again.
+alerts:
+  enabled: true
+  sync_failures: 3         # syncs run every 6h: alert after this many failures in a row
+  repeat_hours: 24         # remind again while still failing
+  emails: []               # who gets alerts; empty = the notify.emails below
+  server_name: ""          # shown in alerts, e.g. "prod-docker-01"; empty = container hostname
+
+notify:
+  # Notify this many days before the expiry date (one month, two weeks, day before).
+  days_before: [30, 14, 1]
+  # Also notify on the expiry day (or once, if an item is found already expired < 7 days ago).
+  on_expiry_day: true
+  # individual = one email per item; digest = one email per run listing all due items.
+  mode: individual
+  # Who gets every notification. Per-reminder extra recipients: `expiry add ... --notify x@y.com`
+  emails:
+    - it-ops@example.com
+  # Optional chat notifications (always one message per check with all due items).
+  webhooks: []
+  #  - format: slack          # Slack incoming webhook
+  #    url: ${SLACK_WEBHOOK_URL}
+  #  - format: teams          # Teams "Workflows" webhook (Post to a channel when a webhook request is received)
+  #    url: ${TEAMS_WEBHOOK_URL}
+  #  - format: generic        # any endpoint; receives JSON {title, text, items[]}
+  #    url: https://example.com/hooks/expiry
+
+email:
+  enabled: true
+  # smtp  = any SMTP server (Office 365, Gmail, SendGrid, Postfix relay...)
+  # graph = Microsoft Graph sendMail with the same Entra app (needs Mail.Send application permission)
+  transport: smtp
+  from: "Expiry Monitor <expiry@example.com>"
+  # Subject is a Jinja2 template. Variables: items, item (= items[0]), count, today, certificate.
+  # Leave commented to use the built-in subject, e.g. "[Expiry] Payroll API cert expires in 14 days"
+  # or "[Expiry] Certificate *.example.com expires in 14 days (3 servers)". Custom example:
+  # subject: >-
+  #   {% if items|length > 1 %}[Expiry] {{ items|length }} items are expiring soon
+  #   {% else %}[Expiry] {{ item.name }} expires {{ item.when }}{% endif %}
+  # HTML body template (Jinja2). Empty = built-in template.
+  # A copy of the built-in one is installed at /config/templates/reminder.html.j2 to customize:
+  template_file: ""
+  # template_file: /config/templates/reminder.html.j2
+  smtp:
+    host: ${SMTP_HOST:-smtp.office365.com}
+    port: ${SMTP_PORT:-587}
+    security: starttls      # starttls (587) | ssl (465) | none (25 / local relay)
+    username: ${SMTP_USERNAME}
+    password: ${SMTP_PASSWORD}
+    timeout: 30
+  graph:
+    sender: expiry@example.com   # mailbox the app sends as (transport: graph)
+
+# Entra ID (Azure AD) app registration used to read other apps' secrets/certificates
+# (and to send mail when email.transport is graph). See README "Connect to Entra ID".
+entra:
+  tenant_id: ${ENTRA_TENANT_ID}
+  client_id: ${ENTRA_CLIENT_ID}
+  client_secret: ${ENTRA_CLIENT_SECRET}
+  # More secure: a certificate instead of a secret (the private key never leaves this server).
+  # Create it with `expiry entra cert-create`, upload the .crt in Entra, then set:
+  # certificate_path: /data/entra-auth.pem
+  # and remove client_secret. The thumbprint is read from the file; only set it for a key-only PEM:
+  # certificate_thumbprint: ${ENTRA_CERT_THUMBPRINT}
+  # Only for sovereign clouds (e.g. US Government); leave commented for the normal public cloud:
+  # authority_host: https://login.microsoftonline.us
+  # graph_url: https://graph.microsoft.us
+
+sources:
+  entra:
+    enabled: false                   # set to true once the entra block above is filled in
+    include_secrets: true            # client secrets (passwordCredentials)
+    include_certificates: true       # certificates (keyCredentials)
+    include_service_principals: false  # enterprise apps too (e.g. SAML signing certificates)
+    include: []                      # only these apps (display-name globs or appIds), e.g. ["prod-*"]
+    exclude: []                      # skip these apps, e.g. ["test-*", "00000000-0000-0000-0000-000000000000"]
+    notify_owners: false             # also email each app's owners (needs User.ReadBasic.All)
+    ignore_expired_after_days: 30    # do not import credentials that expired longer ago than this
+
+  ssl:
+    enabled: true
+    timeout: 10
+    # Hosts can also be managed from the CLI: expiry ssl add example.com
+    hosts: []
+    #  - example.com                    # domain (port 443)
+    #  - mail.example.com:993           # domain + port (any TLS service: IMAPS, LDAPS, ...)
+    #  - 203.0.113.10                   # IP address (port 443)
+    #  - 203.0.113.10:8443              # IP address + port
+    #  - "[2001:db8::10]:443"           # IPv6: brackets, and quotes because of the colons
+    #  - host: 10.0.0.15                # IP that serves several sites: pick one by name (SNI),
+    #    port: 443                      # e.g. a load balancer or reverse proxy
+    #    sni: portal.example.com
+    #    name: "Portal VIP (F5)"
+    #    notes: "cert lives on the load balancer"
+
+    # Find where your certificates are installed (including wildcards on several servers) and
+    # track them automatically. Only reads each server's certificate (a TLS handshake, like a
+    # browser); nothing else is sent. Try it first by hand: expiry ssl scan --domain example.com
+    scan:
+      enabled: false
+      schedule: "0 5 * * 1"          # cron: weekly, Monday 05:00
+      domains: []                    # keep certificates issued for these, e.g. [example.com]
+      names: []                      # extra host names to try besides the built-in ~180, e.g. [erp, hr-portal]
+      names_file: ""                 # more names from a file in /etc/expiry, e.g. /config/scan-names.csv
+                                     # (one per line, or a Windows DNS CSV / BIND export; see README)
+      networks: []                   # also scan these ranges, e.g. ["10.1.2.0/24", "10.1.3.0/24"]
+                                     # (opt-in: tell your network/security team; max 65536 address x port)
+      ports: [443, 8443, 9443]       # add app ports, e.g. 993 (IMAPS), 636 (LDAPS), 5001; STARTTLS not supported
+      certificate_logs: true         # also look up public host names in crt.sh
+      timeout: 3                     # seconds per connection
+      add: true                      # track what is found automatically (false = only email a report)

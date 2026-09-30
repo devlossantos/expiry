@@ -1,0 +1,20 @@
+# Production-style deployment with Docker Compose (alternative to the `docker run` command).
+#   sudo mkdir -p /etc/expiry   # then run the installer (README) to create config.yaml + expiry.env
+#   docker compose up -d
+services:
+  expiry:
+    image: ${EXPIRY_IMAGE:-ghcr.io/devlossantos/expiry:latest}
+    container_name: expiry
+    restart: unless-stopped
+    env_file: /etc/expiry/expiry.env
+    logging:                     # keep at most 5 x 10 MB of logs (docker logs expiry)
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+    volumes:
+      - /etc/expiry:/config:ro
+      - expiry-data:/data
+      # nightly backups on the host (create first: sudo install -d -o 10001 -g 10001 -m 750 /var/backups/expiry)
+      - /var/backups/expiry:/backups
+
+volumes:
+  expiry-data:

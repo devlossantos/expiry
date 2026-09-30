@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 # ---------------------------------------------------------------- build
 FROM python:3.12-slim AS build
+# version of the app, from the git tag (passed by CI); local builds report 0.0.0+local
+ARG VERSION=0.0.0+local
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
 WORKDIR /src
 COPY pyproject.toml README.md ./
 COPY src ./src

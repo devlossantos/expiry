@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "expiry"
-version = "1.0.0"
+dynamic = ["version"]   # from the git tag (setuptools-scm): tag v1.2.3 -> version 1.2.3
 description = "Track expiring secrets, certificates and anything else - with Entra ID + SSL sync and email reminders."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,6 +35,11 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 expiry = ["templates/*"]
+
+[tool.setuptools_scm]
+# Docker builds have no .git: CI passes the version (SETUPTOOLS_SCM_PRETEND_VERSION);
+# a local build without it reports this
+fallback_version = "0.0.0+local"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

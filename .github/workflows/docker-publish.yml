@@ -2,7 +2,8 @@
 # No secrets to configure: it authenticates with the built-in GITHUB_TOKEN.
 #   pull request  -> tests + image scan (nothing published)
 #   push to main  -> ghcr.io/<owner>/<repo>:edge
-#   tag v1.2.3    -> ghcr.io/<owner>/<repo>:1.2.3, :1.2, :latest
+#   tag v1.2.3    -> ghcr.io/<owner>/<repo>:1.2.3, :1.2, :latest + a GitHub Release with notes
+#                    (the app's version comes from the tag: no version to edit in any file)
 #   every Monday  -> re-scan the published :latest image for newly disclosed vulnerabilities
 # Scan results appear under the repo's Security tab > Code scanning. A CRITICAL vulnerability
 # that has a fix available stops the image from being published. Dependency vulnerabilities are
@@ -27,6 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, for the version
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -45,9 +48,17 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, for the version
 
       - name: Image name (registry names must be lowercase)
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: App version from git (tag v1.2.3 -> 1.2.3; main -> 1.2.4.devN+g<commit>)
+        run: |
+          python3 -m pip install -q setuptools-scm
+          echo "VERSION=$(python3 -m setuptools_scm)" >> "$GITHUB_ENV"
+          python3 -m setuptools_scm
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -60,6 +71,7 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: expiry:scan
+          build-args: VERSION=${{ env.VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -106,6 +118,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ env.VERSION }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -121,6 +134,20 @@ jobs:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+  # tag v1.2.3: a GitHub Release page with notes generated from the commits since the last tag
+  release:
+    needs: image
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
 
   # weekly: new vulnerabilities are published every day, so re-check what people are running
   scan-published:

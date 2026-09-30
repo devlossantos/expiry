@@ -59,7 +59,8 @@ notify:
   emails:
     - it-ops@example.com
   # Optional chat notifications (always one message per check with all due items).
-  webhooks: []
+  # To add one: remove the # in front of an example below (keep the indentation).
+  webhooks:
   #  - format: slack          # Slack incoming webhook
   #    url: ${SLACK_WEBHOOK_URL}
   #  - format: teams          # Teams "Workflows" webhook (Post to a channel when a webhook request is received)
@@ -123,7 +124,9 @@ sources:
     enabled: true
     timeout: 10
     # Hosts can also be managed from the CLI: expiry ssl add example.com
-    hosts: []
+    # To add one: remove the # in front of an example below, or add a line like "      - example.com"
+    # (6 spaces, dash, space). Nothing listed = no hosts from this file.
+    hosts:
     #  - example.com                    # domain (port 443)
     #  - mail.example.com:993           # domain + port (any TLS service: IMAPS, LDAPS, ...)
     #  - 203.0.113.10                   # IP address (port 443)

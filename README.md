@@ -49,19 +49,20 @@ Microsoft (Entra, email), the SSL hosts you track and any subnets you want to sc
 3. [Try it locally](#try-it-locally-linux-or-windows-wsl)
 4. [Publish the image (GitHub Container Registry)](#publish-the-image-github-container-registry)
 5. [Install on a Linux server](#install-on-a-linux-server)
-6. [Connect to Entra ID](#connect-to-entra-id)
-7. [Send email through Microsoft 365](#send-email-through-microsoft-365-graph)
-8. [Command reference](#command-reference)
-9. [Configuration](#configuration)
-10. [SSL certificates](#ssl-certificates)
-11. [Backups and restore](#backups-and-restore)
-12. [Self-monitoring alerts](#self-monitoring-alerts)
-13. [Security notes](#security-notes)
-14. [What is logged, and where](#what-is-logged-and-where)
-15. [Adding more sources later](#adding-more-sources-later)
-16. [Troubleshooting](#troubleshooting)
-17. [Development](#development)
-18. [License](#license)
+6. [Running on a Windows PC (WSL)](#running-on-a-windows-pc-wsl)
+7. [Connect to Entra ID](#connect-to-entra-id)
+8. [Send email through Microsoft 365](#send-email-through-microsoft-365-graph)
+9. [Command reference](#command-reference)
+10. [Configuration](#configuration)
+11. [SSL certificates](#ssl-certificates)
+12. [Backups and restore](#backups-and-restore)
+13. [Self-monitoring alerts](#self-monitoring-alerts)
+14. [Security notes](#security-notes)
+15. [What is logged, and where](#what-is-logged-and-where)
+16. [Adding more sources later](#adding-more-sources-later)
+17. [Troubleshooting](#troubleshooting)
+18. [Development](#development)
+19. [License](#license)
 
 ---
 
@@ -248,18 +249,27 @@ The image is built and published automatically by GitHub Actions
 **ghcr.io/devlossantos/expiry**, for both Intel (amd64) and ARM (arm64) servers. There are no
 secrets to set up; the workflow uses the built-in `GITHUB_TOKEN`.
 
-| You do | Tests | Image tags published |
+| You do | Tests + security scan | Published |
 |---|---|---|
-| open a pull request | ✔ | none |
-| push to `main` | ✔ | `:edge` (latest development build) |
-| push a tag `v1.2.3` | ✔ | `:1.2.3`, `:1.2`, `:latest` |
+| open a pull request | ✔ | nothing |
+| push to `main` | ✔ | image `:edge` (latest development build) |
+| push a tag `v1.2.3` | ✔ | images `:1.2.3`, `:1.2`, `:latest` + a **GitHub Release** page with notes generated from the commits |
 
-Make a release:
+**Versions come from the git tag.** There is no version number to edit in any file: tag `v1.2.3`
+makes the app report `1.2.3` (`expiry --version`, `expiry status`). Development builds report the
+distance from the last release, e.g. `1.2.4.dev3+g88508e1` (3 commits after 1.2.3, at commit
+`88508e1`).
+
+Make a release, once `main` is green in the **Actions** tab:
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.1
+git push origin v1.0.1
 ```
+
+Which number? `MAJOR.MINOR.PATCH`: bug fixes only → **patch** (1.0.1), new features that don't
+break anything → **minor** (1.1.0), changes that require users to change their config or setup →
+**major** (2.0.0). Not every commit needs a release: tag when a set of changes is ready for servers.
 
 Follow it under the repo's **Actions** tab. The image then appears under **Packages** on the repo
 page. The package takes the repo's visibility: public repo, public image, and anyone can
@@ -435,6 +445,62 @@ The wrapper calls `docker`. Choose one:
   ```
 
   Users must log out and in again to pick up the new group.
+
+---
+
+## Running on a Windows PC (WSL)
+
+expiry runs fine in **WSL** (Windows Subsystem for Linux), which is Linux, so the
+[install](#install-on-a-linux-server) is the same. Three things are different on a Windows PC:
+
+**1. Keep WSL running.** WSL shuts down shortly after its last terminal closes, and expiry with it.
+This task starts WSL hidden in the background at every login. In PowerShell:
+
+```powershell
+$action   = New-ScheduledTaskAction -Execute "conhost.exe" -Argument "--headless wsl.exe -d AlmaLinux-10 --exec sleep infinity"
+$trigger  = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+Register-ScheduledTask -TaskName "WSL keep-alive" -Action $action -Trigger $trigger -Settings $settings
+Start-ScheduledTask -TaskName "WSL keep-alive"
+(Get-ScheduledTask "WSL keep-alive").State      # Running
+```
+
+Replace `AlmaLinux-10` with your distribution (`wsl -l -v`). WSL starts Docker (systemd must be
+enabled: `[boot] systemd=true` in `/etc/wsl.conf`), and Docker starts expiry
+(`--restart unless-stopped`). You never start expiry by hand. For a machine that should run without
+anyone logged in, use `-AtStartup` instead of `-AtLogOn`, and register the task with the account's
+password (`-User ... -Password ...`, "run whether user is logged on or not").
+
+**2. Schedule for a PC that isn't always on.** The default schedule suits a server that is always
+on. On a PC, backups at 02:30 would never run. In `/etc/expiry/config.yaml`:
+
+```yaml
+schedule:
+  sync: "0 * * * *"          # every hour while the PC is on
+  check: "15 * * * *"        # every hour: each reminder is still sent only once
+  run_on_start: true         # catch up at every start
+backup:
+  schedule: "30 12 * * *"    # daily at 12:30
+# sources.ssl.scan.schedule: "0 10 * * 1"   (Mondays 10:00, if you use the weekly scan)
+```
+
+Then `expiry config check` and `sudo docker restart expiry`.
+
+While the PC is off nothing runs. Reminders that became due in the meantime are sent at the next
+start (they're late, not lost), and nobody else gets reminders or alerts during that time. If
+people rely on the reminders, run expiry on a machine that is always on.
+
+**3. Networking, backups, access.**
+* Traffic to the network (Entra, email, SSL hosts, subnet scans) comes **from the PC's IP**, so
+  firewall rules and allow-lists use the PC's address ([Network access](#network-access-firewall-rules)).
+  With a corporate VPN or unreliable DNS inside WSL, set `networkingMode=mirrored` and
+  `dnsTunneling=true` under `[wsl2]` in `%UserProfile%\.wslconfig`, then `wsl --shutdown`.
+* The backups in `/var/backups/expiry` live on the same PC. Copy them to a Windows or network
+  folder daily, e.g. in `/etc/cron.d/expiry-backup-copy` (needs `cronie` enabled):
+  `0 13 * * * root cp -u /var/backups/expiry/*.db /mnt/c/Backups/expiry/`
+* A WSL distribution belongs to one Windows user, so other admins can't use the `expiry` command
+  on your PC. For a shared setup, use a server.
+* Make sure the PC doesn't sleep while you rely on it (`powercfg /change standby-timeout-ac 0`).
 
 ---
 
@@ -988,7 +1054,7 @@ work for it automatically. Good candidates:
 
 ```bash
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+pip install -e ".[dev]"      # needs the git history (tags) for the version: expiry --version
 pytest -q
 EXPIRY_DB=./dev.db EXPIRY_CONFIG=config/config.example.yaml expiry list
 ```

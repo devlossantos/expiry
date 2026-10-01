@@ -16,3 +16,5 @@ config/*.local.yaml
 config/expiry.env
 .env
 *.pem
+*.crt
+*.cer

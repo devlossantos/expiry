@@ -1,11 +1,10 @@
 from datetime import timedelta
 
 import pytest
+from conftest import TODAY, make_config
 
 from expiry.checker import due_stage, run_check
 from expiry.notify import Renderer, item_context
-
-from conftest import TODAY, make_config
 
 
 @pytest.mark.parametrize("days_left,expected", [

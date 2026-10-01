@@ -249,7 +249,11 @@ The image is built and published automatically by GitHub Actions
 **ghcr.io/devlossantos/expiry**, for both Intel (amd64) and ARM (arm64) servers. There are no
 secrets to set up; the workflow uses the built-in `GITHUB_TOKEN`.
 
-| You do | Tests + security scan | Published |
+Every run checks: **tests on Python 3.10–3.13**, **lint** (ruff for Python, shellcheck for the
+scripts), a **smoke test of the built image** (version, installer, daemon starts healthy, CLI
+works, no errors in the logs) and the **vulnerability scan**. Nothing is published if any fails.
+
+| You do | Checks | Published |
 |---|---|---|
 | open a pull request | ✔ | nothing |
 | push to `main` | ✔ | image `:edge` (latest development build) |
@@ -472,7 +476,9 @@ anyone logged in, use `-AtStartup` instead of `-AtLogOn`, and register the task 
 password (`-User ... -Password ...`, "run whether user is logged on or not").
 
 **2. Schedule for a PC that isn't always on.** The default schedule suits a server that is always
-on. On a PC, backups at 02:30 would never run. In `/etc/expiry/config.yaml`:
+on. A backup or scan missed while the PC was off is caught up automatically (at start-up and after
+each check), but reminders are only checked on schedule, so check more often. In
+`/etc/expiry/config.yaml`:
 
 ```yaml
 schedule:
@@ -757,7 +763,7 @@ Every command has `--help`, and `expiry help <command>` works too.
 | `expiry check [--dry-run]` | Send due notifications now |
 | `expiry test-notify [--to EMAIL]` | Send a sample email / webhook |
 | `expiry status` · `history` · `audit` | Service health, sent notifications, change log |
-| `expiry export [-f json\|csv] [-a]` · `import FILE\|-` | Backup / bulk import |
+| `expiry export [-f json\|csv] [-a] > FILE` · `import - < FILE` | Export / bulk import (CSV dates may use your `date_format`) |
 | `expiry config show` · `config check [--connect]` | Effective config (secrets masked) / validation |
 | `expiry backup create` · `backup list` · `backup restore FILE` | Database backups (automatic nightly) |
 | `expiry entra cert-create` · `entra cert-show [--pem]` | Certificate login for the Entra app |
@@ -933,7 +939,8 @@ Notes:
 
 The daemon backs up the database **every night at 02:30** (`backup.schedule`) and keeps the newest
 **14** (`backup.keep`). Each backup is a consistent, integrity-checked snapshot taken while the
-service runs.
+service runs. If the machine was off at that time, the missed backup runs automatically as soon as
+the service is up again (the same goes for a missed weekly scan).
 
 **Where:** to `/backups` inside the container when a host folder is mounted there (install step 3:
 `/var/backups/expiry` on the server), otherwise to `/data/backups` inside the data volume. Prefer the
@@ -953,7 +960,7 @@ folder permissions), you get a [self-monitoring alert](#self-monitoring-alerts).
 
 What is **not** in a backup: `config.yaml` and `expiry.env` (they're on the host in
 `/etc/expiry`; back that folder up too) and the Entra certificate key (create a new one if needed).
-For a readable copy: `expiry export -a > reminders.json` (restore with `expiry import`).
+For a readable copy: `expiry export -a > reminders.json` (restore with `expiry import - < reminders.json`).
 
 ## Self-monitoring alerts
 
@@ -1055,9 +1062,15 @@ work for it automatically. Good candidates:
 ```bash
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"      # needs the git history (tags) for the version: expiry --version
-pytest -q
+pytest -q                    # the same tests CI runs on Python 3.10-3.13
+pip install ruff && ruff check src tests      # lint (rules in pyproject.toml); `--fix` sorts imports
+shellcheck scripts/*.sh                       # shell scripts
 EXPIRY_DB=./dev.db EXPIRY_CONFIG=config/config.example.yaml expiry list
 ```
+
+The command runs inside the container on a server, so files are passed through the wrapper:
+`expiry import - < reminders.csv` and `expiry export -f csv > reminders.csv` (not `-o`/a path,
+which would refer to the container's filesystem).
 
 Layout:
 

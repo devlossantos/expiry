@@ -88,8 +88,9 @@ def test_help_command(run):
 
 
 def test_audit_entries_from_cli_are_saved(run, tmp_path, monkeypatch):
-    from expiry.db import Store
     import os
+
+    from expiry.db import Store
     s = Store(os.environ["EXPIRY_DB"])
     s.audit("tester", "scan", None, "checked 3 names")
     s.close()

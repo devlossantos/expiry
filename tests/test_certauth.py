@@ -2,11 +2,10 @@ import os
 import sys
 
 import pytest
+from conftest import make_config
 
 from expiry.certauth import CertError, create, load_credential, public_path
 from expiry.config import validate
-
-from conftest import make_config
 
 
 def test_create_and_load(tmp_path):

@@ -1,9 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
-from expiry import health
-
-
 from conftest import make_config
+
+from expiry import health
 
 
 class Sender:

@@ -4,6 +4,7 @@ import threading
 from datetime import date, timedelta
 
 import pytest
+from conftest import make_config
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -13,8 +14,6 @@ from expiry.sources import sync_source
 from expiry.sources.base import FetchResult, Item
 from expiry.sources.entra import EntraSource
 from expiry.sources.sslcert import SslSource, probe
-
-from conftest import make_config
 
 
 class FakeGraph:

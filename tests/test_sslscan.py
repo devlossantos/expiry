@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+from conftest import TODAY, make_config
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -14,8 +15,6 @@ from cryptography.x509.oid import NameOID
 from expiry.checker import run_check
 from expiry.sources import sslscan
 from expiry.sources.sslcert import CertInfo, Target
-
-from conftest import TODAY, make_config
 
 NOT_AFTER = dt.datetime(2027, 3, 7, 13, 15, tzinfo=dt.timezone.utc)
 

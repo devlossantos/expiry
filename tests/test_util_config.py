@@ -1,11 +1,10 @@
 from datetime import date, datetime, timezone
 
 import pytest
+from conftest import TODAY, make_config
 
 from expiry.config import load_config, masked, validate
 from expiry.util import format_date, parse_date, parse_graph_datetime, parse_host_port
-
-from conftest import TODAY, make_config
 
 
 @pytest.mark.parametrize("value,expected", [

@@ -93,7 +93,10 @@ def _job_scan(config_path: str | None) -> None:
                      f"checked {result.names_checked} names, {result.addresses_checked} addresses: "
                      f"{len(result.found)} locations, {len(new)} new, {len(added)} added")
         store.kv_set("last_scan", {"at": utcnow_iso(), "found": len(result.found), "added": len(added),
-                                   "untracked": len(new) - len(added), "warnings": result.warnings})
+                                   "untracked": len(new) - len(added), "warnings": result.warnings,
+                                   "networks": result.networks})
+        for net in result.networks:
+            log.info("scan: discovered network %s", net)
         log.info("scan: %d names, %d addresses checked; %d locations found, %d new, %d added",
                  result.names_checked, result.addresses_checked, len(result.found), len(new), len(added))
         for w in result.warnings:
@@ -101,9 +104,12 @@ def _job_scan(config_path: str | None) -> None:
         if new:
             verb = "now tracked" if added else "not tracked yet (run: expiry ssl scan --add)"
             lines = [f"The weekly certificate scan found {len(new)} new location(s), {verb}:"]
-            lines += [f"{f.location}: {f.info.common_name} ({f.info.issuer}), expires "
+            lines += [f"{f.location}{f' [{f.name}]' if f.name else ''}: {f.info.common_name or '(no name)'} "
+                      f"({f.info.issuer}), expires "
                       f"{f.info.not_after:%d/%m/%Y}{' [wildcard]' if sslscan.is_wildcard(f.info) else ''}"
-                      for f in new]
+                      for f in new[:50]]
+            if len(new) > 50:  # a first scan of a busy network can find hundreds
+                lines.append(f"... and {len(new) - 50} more: run `expiry ssl list` to see them all")
             lines.append("-- expiry certificate scan (sources.ssl.scan in config.yaml)")
             send_message(cfg, split_emails(cfg.get("notify.emails") or []),
                          f"[Expiry] Certificate scan found {len(new)} new location(s)", lines)

@@ -101,13 +101,14 @@ def test_ssl_scan_names_from_stdin_and_missing_file(run, monkeypatch):
     from expiry.sources import sslscan
     seen = {}
 
-    def fake_scan(domains, names, networks, ports, use_logs, timeout):
-        seen.update(domains=domains, names=names, ports=ports)
+    def fake_scan(domains, names, networks, ports, use_logs, timeout, match_all=False):
+        seen.update(domains=domains, names=names, ports=ports, match_all=match_all)
         return sslscan.ScanResult()
 
     monkeypatch.setattr(sslscan, "scan", fake_scan)
     r = run("ssl", "scan", "-d", "corp.test", "--names-file", "-", input='"HostName"\n"crm-prod"\nerp\n')
     assert r.exit_code == 0 and "2 name(s) read from stdin" in r.output
-    assert seen == {"domains": ["corp.test"], "names": ["crm-prod", "erp"], "ports": [443, 8443, 9443]}
+    assert seen == {"domains": ["corp.test"], "names": ["crm-prod", "erp"], "ports": [443, 8443, 9443],
+                    "match_all": False}  # --domain given: keep that domain's certificates only
     r = run("ssl", "scan", "-d", "corp.test", "--names-file", "/nope/names.txt")
     assert r.exit_code == 2 and "/etc/expiry/" in r.output

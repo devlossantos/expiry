@@ -11,7 +11,10 @@ TODAY = date(2026, 9, 30)
 
 
 def make_config(**overrides) -> Config:
-    data = _merge(DEFAULTS, {"timezone": "UTC", "database": ":memory:"})
+    # Network discovery is on by default in production. Tests must never sweep the real network of
+    # whatever machine runs them, so the scan is off here unless a test turns it on and fakes the inputs.
+    data = _merge(DEFAULTS, {"timezone": "UTC", "database": ":memory:",
+                             "sources": {"ssl": {"scan": {"enabled": False, "discover_networks": False}}}})
     for dotted, value in overrides.items():
         node = data
         parts = dotted.split("__")

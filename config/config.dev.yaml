@@ -56,3 +56,7 @@ sources:
       # - host: 203.0.113.10          # IP that serves several sites: ask for one by name (SNI)
       #   sni: portal.example.com
       #   name: "Portal VIP"
+    scan:
+      # Off for the local test stack: on a laptop the weekly scan would sweep your home or office
+      # network. To try it: `expiry ssl networks` shows what it would scan, `expiry ssl scan` runs it.
+      enabled: false

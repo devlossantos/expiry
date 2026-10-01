@@ -8,8 +8,12 @@ Candidates come from three places:
   * certificate logs - public Certificate Transparency logs (crt.sh), for public host names
 
 Only certificates that belong to one of your domains are kept (their name or SANs match the domain,
-including wildcards such as *.example.com). Results are grouped by certificate, so a wildcard installed
-on several servers shows up once with all its locations.
+including wildcards such as *.example.com). With no domain configured (match: all), every certificate
+found on the scanned networks is kept instead: the self-signed certificates of printers, consoles and
+appliances are exactly the ones nobody tracks. Results are grouped by certificate, so a wildcard
+installed on several servers shows up once with all its locations.
+
+The networks themselves can be discovered rather than listed: see netdiscover.py.
 """
 
 from __future__ import annotations
@@ -52,6 +56,7 @@ class Found:
     address: str       # IP that answered
     info: CertInfo
     via: str           # "name" | "network" | "logs"
+    name: str = ""     # display name for an address-only find (its reverse-DNS name)
 
     @property
     def external_id(self) -> str:
@@ -69,6 +74,7 @@ class ScanResult:
     warnings: list[str] = field(default_factory=list)
     names_checked: int = 0
     addresses_checked: int = 0
+    networks: list[str] = field(default_factory=list)  # discovered networks, with their reasons
 
     def by_certificate(self) -> dict[str, list[Found]]:
         groups: dict[str, list[Found]] = {}
@@ -173,7 +179,8 @@ def network_addresses(networks: list[str], limit: int = MAX_NETWORK_TARGETS) -> 
 
 def scan(domains: list[str], names: list[str] | None = None, networks: list[str] | None = None,
          ports: list[int] | None = None, use_logs: bool = True, timeout: float = 3.0, workers: int = 32,
-         resolver=None, reverse=None) -> ScanResult:
+         resolver=None, reverse=None, match_all: bool = False) -> ScanResult:
+    """match_all: keep every certificate found on `networks`, not only those for `domains`."""
     resolver = resolver or resolve  # looked up at call time (patchable in tests)
     reverse = reverse or reverse_name
     result = ScanResult()
@@ -209,16 +216,18 @@ def scan(domains: list[str], names: list[str] | None = None, networks: list[str]
             info = probe(ip, port, "", timeout)
         except Exception:  # noqa: BLE001
             return None
-        if belongs_to(info, doms):
+        if doms and belongs_to(info, doms):
             return Found(ip, port, "", ip, info, "network")
         ptr = reverse(ip)
-        if ptr and any(ptr == d or ptr.endswith("." + d) for d in doms):
+        if ptr and doms and any(ptr == d or ptr.endswith("." + d) for d in doms):
             try:
-                info = probe(ip, port, ptr, timeout)
+                named = probe(ip, port, ptr, timeout)
             except Exception:  # noqa: BLE001
-                return None
-            if belongs_to(info, doms):
-                return Found(ip, port, ptr, ip, info, "network")
+                named = None
+            if named is not None and belongs_to(named, doms):
+                return Found(ip, port, ptr, ip, named, "network")
+        if match_all:
+            return Found(ip, port, "", ip, info, "network", name=ptr)
         return None
 
     with ThreadPoolExecutor(workers) as pool:
@@ -268,14 +277,43 @@ def track(store, found: list[Found], actor: str, tz, ids: set[str], addresses: s
         if is_tracked(f, ids, addresses) or store.find_ssl_target(f.host, f.port, f.sni):
             continue
         note = f"found by scan ({f.via})" + (" · wildcard" if is_wildcard(f.info) else "")
-        store.add_ssl_target(f.host, f.port, f.sni, "", note, actor)
-        t = Target(f.host, f.port, f.sni, "", note)
+        label = f"SSL {f.name} ({f.host}{'' if f.port == 443 else f':{f.port}'})" if f.name else ""
+        store.add_ssl_target(f.host, f.port, f.sni, label, note, actor)
+        t = Target(f.host, f.port, f.sni, label, note)
         store.upsert_external("ssl", t.external_id, t.label, f.info.not_after.astimezone(tz).date(),
                               f.info.meta(), actor, notes=note)
         ids.add(f.external_id)
         addresses.add((f.address, f.port))
         added.append(f)
     return added
+
+
+def match_all(opts: dict, domains: list[str]) -> bool:
+    """sources.ssl.scan.match: 'all', 'domains', or 'auto' (all when no domain is configured)."""
+    mode = str(opts.get("match") or "auto").lower()
+    return mode == "all" or (mode == "auto" and not domains)
+
+
+def scan_networks(cfg, store, ports: list[int], warnings: list[str]) -> tuple[list[str], list]:
+    """The networks to scan: sources.ssl.scan.networks plus, with discover_networks on, the private
+    networks this server can reach (trimmed to what is left of the per-scan budget).
+    Returns (CIDR strings, the Discovered entries that were used)."""
+    from expiry.sources import netdiscover
+    from expiry.sources.sslcert import SslSource
+
+    opts = cfg.get("sources.ssl.scan") or {}
+    configured = [str(n) for n in (opts.get("networks") or [])]
+    if not opts.get("discover_networks", True):
+        return configured, []
+    budget = MAX_NETWORK_TARGETS // max(len(ports), 1)
+    used = sum(ipaddress.ip_network(n, strict=False).num_addresses for n in configured)
+    known = [t.host for t in SslSource(cfg, store).targets()]
+    found = netdiscover.discover(known, int(opts.get("discover_prefix") or 24),
+                                 list(opts.get("exclude_networks") or []), warnings=warnings)
+    already = [ipaddress.ip_network(n, strict=False) for n in configured]
+    found = [d for d in found if not any(d.network.subnet_of(c) for c in already if c.version == 4)]
+    kept = netdiscover.within_budget(found, max(budget - used, 0), warnings)
+    return configured + [str(d.network) for d in kept], kept
 
 
 def run_scheduled(cfg, store, actor: str = "scan") -> tuple[ScanResult, list[Found], list[Found]]:
@@ -289,9 +327,14 @@ def run_scheduled(cfg, store, actor: str = "scan") -> tuple[ScanResult, list[Fou
     names = list(opts.get("names") or [])
     if opts.get("names_file"):
         names += read_names_file(opts["names_file"])
-    result = scan(opts.get("domains") or [], names, opts.get("networks") or [],
-                  opts.get("ports") or DEFAULT_PORTS, bool(opts.get("certificate_logs", True)),
-                  float(opts.get("timeout") or 3))
+    domains = list(opts.get("domains") or [])
+    ports = [int(p) for p in (opts.get("ports") or DEFAULT_PORTS)]
+    warnings: list[str] = []
+    networks, discovered = scan_networks(cfg, store, ports, warnings)
+    result = scan(domains, names, networks, ports, bool(opts.get("certificate_logs", True)),
+                  float(opts.get("timeout") or 3), match_all=match_all(opts, domains))
+    result.warnings = warnings + result.warnings
+    result.networks = [str(d) for d in discovered]
     ids, addresses = tracked_state(SslSource(cfg, store).targets())
     new = [f for f in result.found if not is_tracked(f, ids, addresses)]
     added = track(store, new, actor, ZoneInfo(cfg.timezone), ids, addresses) if opts.get("add", True) else []

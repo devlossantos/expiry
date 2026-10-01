@@ -127,7 +127,8 @@ def test_run_scheduled_report_only(store, wildcard_server, monkeypatch):
     port = wildcard_server
     monkeypatch.setattr(sslscan, "resolve", fake_dns({"wiki.corp.test": ["127.0.0.1"]}))
     cfg = make_config(sources__ssl__scan={"enabled": True, "domains": ["corp.test"], "ports": [port],
-                                          "certificate_logs": False, "add": False, "names": [], "networks": []})
+                                          "certificate_logs": False, "add": False, "names": [], "networks": [],
+                                          "discover_networks": False})
     result, added, new = sslscan.run_scheduled(cfg, store)
     assert added == [] and [f.host for f in new] == ["wiki.corp.test"] and store.ssl_targets() == []
 
@@ -162,7 +163,13 @@ def test_scan_config_validation():
         "enabled": True, "domains": [], "networks": ["10.0.0.0/8", "nonsense"], "ports": [443],
         "schedule": "0 5 * * 1"})
     text = "\n".join(validate(bad)[0])
-    assert "scan.domains" in text and "nonsense" in text and "too many" in text
+    assert "nonsense" in text and "too many" in text
+    # domains are optional now: the scan discovers networks itself
+    assert "scan.domains" not in text
+    nothing = make_config(email__enabled=False, sources__ssl__scan={
+        "enabled": True, "domains": [], "networks": [], "discover_networks": False, "ports": [443],
+        "schedule": "0 5 * * 1"})
+    assert "nothing to scan" in "\n".join(validate(nothing)[0])
 
 
 def test_names_file_formats(tmp_path):

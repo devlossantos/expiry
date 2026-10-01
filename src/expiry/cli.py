@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import ipaddress
 import json
 import os
 import shutil
@@ -755,6 +756,11 @@ def ssl_discover(app: App, domain: str, do_add: bool, port: int, timeout: float,
                    "Use - to read from stdin: expiry ssl scan -d example.com --names-file - -y < names.txt")
 @click.option("--network", "networks", multiple=True, metavar="CIDR",
               help="Also scan every address in this range (repeatable), e.g. 10.1.2.0/24.")
+@click.option("--discover/--no-discover", default=None,
+              help="Also scan the private networks this server can reach (see `expiry ssl networks`). "
+                   "Default: on when no --domain/--network is given and sources.ssl.scan.discover_networks is on.")
+@click.option("--all-certs", "all_certs", is_flag=True,
+              help="Keep every certificate found on the scanned networks, not only those for --domain.")
 @click.option("-p", "--ports", default=None, metavar="LIST",
               help="Ports to check, e.g. 443,8443,993 (default: sources.ssl.scan.ports = 443,8443,9443).")
 @click.option("--no-logs", is_flag=True, help="Don't look up public certificate logs (crt.sh).")
@@ -765,8 +771,8 @@ def ssl_discover(app: App, domain: str, do_add: bool, port: int, timeout: float,
 @click.option("--json", "as_json", is_flag=True, help="Output JSON.")
 @pass_app
 def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_file: str | None,
-             networks: tuple[str, ...], ports: str | None, no_logs: bool, wildcards_only: bool, timeout: float | None, do_add: bool,
-             yes: bool, as_json: bool) -> None:
+             networks: tuple[str, ...], discover: bool | None, all_certs: bool, ports: str | None, no_logs: bool,
+             wildcards_only: bool, timeout: float | None, do_add: bool, yes: bool, as_json: bool) -> None:
     """Find where your certificates are installed, including wildcards, and optionally track them.
 
     \b
@@ -776,7 +782,11 @@ def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_f
     and looks up public names in certificate logs. Only certificates issued for your
     domains are kept, grouped by certificate, so you see every server a wildcard is on.
     \b
+    With no --domain the scan needs nothing typed in: it discovers the private networks this
+    server can reach and keeps every certificate it finds there (printers, consoles, appliances).
+    \b
     Examples:
+      expiry ssl scan                                  # discovered networks, every certificate
       expiry ssl scan --domain example.com
       expiry ssl scan --domain example.com --names-file - < dns-export.csv
       expiry ssl scan --domain example.com --network 10.1.2.0/24 --ports 443,8443
@@ -792,8 +802,6 @@ def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_f
 
     opts = app.cfg.get("sources.ssl.scan") or {}
     domains_l = list(domains) or list(opts.get("domains") or [])
-    if not domains_l:
-        raise click.UsageError("give --domain example.com (or set sources.ssl.scan.domains)")
     names_l = list(names) or list(opts.get("names") or [])
     file_names = names_file or (opts.get("names_file") if not names else None)
     if file_names == "-":
@@ -814,14 +822,41 @@ def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_f
         ports_l = [int(p) for p in ports.split(",")] if ports else list(opts.get("ports") or sslscan.DEFAULT_PORTS)
     except ValueError as exc:
         raise click.BadParameter("ports must look like 443,8443") from exc
+    if discover is None:
+        discover = not (domains or networks) and bool(opts.get("discover_networks", True))
+    discovered: list = []
+    pre_warnings: list[str] = []
+    if discover:
+        from expiry.sources import netdiscover
+        known = [t.host for t in SslSource(app.cfg, app.store).targets()]
+        try:
+            found = netdiscover.discover(known, int(opts.get("discover_prefix") or 24),
+                                         list(opts.get("exclude_networks") or []), warnings=pre_warnings)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        already = [ipaddress.ip_network(n, strict=False) for n in networks_l]
+        found = [d for d in found if not any(d.network.subnet_of(c) for c in already if c.version == 4)]
+        budget = sslscan.MAX_NETWORK_TARGETS // max(len(ports_l), 1) - sum(a.num_addresses for a in already)
+        discovered = netdiscover.within_budget(found, max(budget, 0), pre_warnings)
+        networks_l += [str(d.network) for d in discovered]
+    if not domains_l and not networks_l:
+        raise click.UsageError("nothing to scan: give --domain example.com or --network CIDR, or let it "
+                               "--discover the networks this server can reach")
+    # --domain on the command line means "certificates for this domain"; otherwise follow the config
+    keep_all = all_certs or (not domains and sslscan.match_all(opts, domains_l))
     use_logs = not no_logs and bool(opts.get("certificate_logs", True))
-    what = f"{', '.join(domains_l)}" + (f" + {', '.join(networks_l)}" if networks_l else "")
+    what = ", ".join(domains_l + networks_l[:6]) + (f" and {len(networks_l) - 6} more" if len(networks_l) > 6 else "")
+    if discovered and not as_json:
+        console.print(f"[dim]Discovered {len(discovered)} network(s) to scan:[/dim]")
+        for d in discovered:
+            console.print(f"[dim]  {escape(str(d))}[/dim]")
     try:
         with console.status(f"Scanning {what} on port(s) {', '.join(map(str, ports_l))} ..."):
             result = sslscan.scan(domains_l, names_l, networks_l, ports_l, use_logs,
-                                  timeout or float(opts.get("timeout") or 3))
+                                  timeout or float(opts.get("timeout") or 3), match_all=keep_all)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    result.warnings = pre_warnings + result.warnings
     ids, addresses = sslscan.tracked_state(SslSource(app.cfg, app.store).targets())
     app.store.audit(actor(), "scan", None, f"{what}, ports {','.join(map(str, ports_l))}: checked "
                      f"{result.names_checked} names, {result.addresses_checked} addresses, "
@@ -837,6 +872,7 @@ def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_f
             "issuer": v[0].info.issuer, "expires_on": v[0].info.not_after.date().isoformat(),
             "sha256": k, "san": v[0].info.san,
             "locations": [{"host": f.host, "port": f.port, "sni": f.sni, "address": f.address, "via": f.via,
+                           "name": f.name,
                            "tracked": sslscan.is_tracked(f, ids, addresses)} for f in v],
         } for k, v in groups.items()])
         return
@@ -863,7 +899,8 @@ def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_f
                 new.append(f)
             cert = Text(info.common_name or "-") + (Text(" wildcard", style="magenta") if sslscan.is_wildcard(info) else "")
             t.add_row(cert if j == 0 else "", Text(info.issuer) if j == 0 else "", app.fmt(exp) if j == 0 else "",
-                      days_text((exp - ref).days) if j == 0 else "", Text(f.location),
+                      days_text((exp - ref).days) if j == 0 else "",
+                      Text(f.location + (f" [{f.name}]" if f.name else "")),
                       f.via + (f" {f.address}" if f.address != f.host else ""),
                       Text("yes", style="green") if tracked else Text("new", style="yellow"),
                       end_section=j == len(locs) - 1 and i < len(groups) - 1)
@@ -878,6 +915,51 @@ def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_f
         raise click.Abort()
     added = sslscan.track(app.store, new, actor(), ZoneInfo(app.cfg.timezone), ids, addresses)
     ok(f"Now tracking {len(added)} more location(s)")
+
+
+@ssl.command("networks")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON.")
+@pass_app
+def ssl_networks(app: App, as_json: bool) -> None:
+    """Show the networks the scheduled scan would discover, and why. Connects to nothing.
+
+    \b
+    Sources: this server's own subnets and routes, the default gateway, the DNS servers
+    in /etc/resolv.conf, and the neighbourhood of every host already tracked. Only private
+    IPv4 ranges are used. Exclude any with sources.ssl.scan.exclude_networks.
+    """
+    from expiry.sources import netdiscover, sslscan
+    from expiry.sources.sslcert import SslSource
+
+    opts = app.cfg.get("sources.ssl.scan") or {}
+    warnings: list[str] = []
+    known = [t.host for t in SslSource(app.cfg, app.store).targets()]
+    found = netdiscover.discover(known, int(opts.get("discover_prefix") or 24),
+                                 list(opts.get("exclude_networks") or []), warnings=warnings)
+    ports = list(opts.get("ports") or sslscan.DEFAULT_PORTS)
+    kept = netdiscover.within_budget(found, sslscan.MAX_NETWORK_TARGETS // max(len(ports), 1), warnings)
+    if as_json:
+        print_json({"networks": [{"network": str(d.network), "reasons": d.reasons, "scanned": d in kept}
+                                 for d in found], "warnings": warnings,
+                    "enabled": bool(opts.get("enabled") and opts.get("discover_networks", True))})
+        return
+    if not opts.get("discover_networks", True):
+        warn("sources.ssl.scan.discover_networks is off: the scheduled scan only uses sources.ssl.scan.networks")
+    for w in warnings:
+        warn(w)
+    if not found:
+        console.print("No private networks found. Add some with sources.ssl.scan.networks.")
+        return
+    t = Table(box=box.SIMPLE_HEAD, pad_edge=False, header_style="bold")
+    t.add_column("Network")
+    t.add_column("Why", overflow="fold")
+    t.add_column("Scanned")
+    for d in found:
+        t.add_row(str(d.network), Text("; ".join(d.reasons)),
+                  Text("yes", style="green") if d in kept else Text("over limit", style="yellow"))
+    console.print(t)
+    console.print(f"[dim]Ports: {', '.join(map(str, ports))} · weekly schedule: "
+                  f"{opts.get('schedule')} · run one now with: expiry ssl scan[/dim]")
 
 
 # ============================================================================ sync / check
@@ -1061,9 +1143,11 @@ def status(app: App, as_json: bool) -> None:
         t.add_row("Entra login", "client secret [dim](a certificate is more secure: expiry entra cert-create)[/dim]")
     if cfg.get("sources.ssl.enabled") and cfg.get("sources.ssl.scan.enabled"):
         ls = store.kv_get("last_scan", {})
-        t.add_row("Scan", f"{', '.join(cfg.get('sources.ssl.scan.domains') or [])}"
-                          + (f" + {', '.join(cfg.get('sources.ssl.scan.networks'))}"
-                             if cfg.get("sources.ssl.scan.networks") else "")
+        scope = [", ".join(cfg.get("sources.ssl.scan.domains") or []),
+                 ", ".join(cfg.get("sources.ssl.scan.networks") or []),
+                 (f"{len(ls.get('networks') or [])} discovered network(s)" if ls.get("networks")
+                  else "discovered networks") if cfg.get("sources.ssl.scan.discover_networks", True) else ""]
+        t.add_row("Scan", " + ".join(x for x in scope if x)
                           + f", '{cfg.get('sources.ssl.scan.schedule')}' (next {local_time(nxt.get('scan'), cfg)}), "
                           + (f"last {local_time(ls.get('at'), cfg)}: {ls.get('found')} found, {ls.get('added')} added"
                              if ls else "not run yet"))

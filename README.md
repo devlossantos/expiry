@@ -330,7 +330,9 @@ sudo nano /etc/expiry/expiry.env      # secrets (root-only, chmod 600, never in 
 sudo install -d -o 10001 -g 10001 -m 750 /var/backups/expiry
 
 # 4. start the service (sudo is required: expiry.env is readable by root only)
-sudo docker run -d --name expiry --restart unless-stopped \
+#    --network host lets the certificate scan see this server's own subnets (see "Finding
+#    certificates automatically"); leave it out to keep the container on Docker's bridge
+sudo docker run -d --name expiry --restart unless-stopped --network host \
   --log-opt max-size=10m --log-opt max-file=5 \
   --env-file /etc/expiry/expiry.env \
   -v /etc/expiry:/config:ro \
@@ -394,7 +396,7 @@ allow-lists are therefore about the **server's IP**, not the container.
 | every SSL host you track | its port (443, 993, ...) | reading certificates (`ssl add`, sync) |
 | internal DNS servers | UDP + TCP 53 | resolving host names and reverse DNS |
 | `crt.sh` | TCP 443 | `ssl discover` / `ssl scan` certificate logs (optional) |
-| **each subnet you scan** (`sources.ssl.scan.networks`) | **each port in `ports`** | `ssl scan --network` |
+| **each subnet you scan** (`expiry ssl networks` lists them) | **each port in `ports`** | the weekly scan, `ssl scan` |
 
 **Scanning subnets.** Ask your network/security team for:
 
@@ -416,6 +418,9 @@ docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' exp
 # allow the expiry container (here the default bridge 172.17.0.0/16) to reach a scan subnet on 443/8443
 sudo iptables -I DOCKER-USER -s 172.17.0.0/16 -d 10.1.2.0/24 -p tcp -m multiport --dports 443,8443 -j ACCEPT
 ```
+
+With `--network host` (recommended for the certificate scan) the container uses the server's own
+network stack, so none of this applies: the server's normal firewall rules do.
 
 **DNS inside the container.** Docker gives the container the server's DNS servers. If internal
 names resolve on the server but not in the container, set them explicitly: add
@@ -760,7 +765,8 @@ Every command has `--help`, and `expiry help <command>` works too.
 | `expiry restore ID` | Un-ignore / un-archive |
 | `expiry ssl add HOST[:PORT]... [--sni NAME] [--name] [-n NOTES] [-f]` | Track certificates of domains/IPs |
 | `expiry ssl list` · `ssl rm TARGET` · `ssl check HOST [--starttls PROTO]` · `ssl discover DOMAIN [--add]` | Manage / inspect / discover SSL targets |
-| `expiry ssl scan [-d DOMAIN] [-n NAME] [--names-file FILE\|-] [--network CIDR] [-p PORTS] [--wildcards] [--add]` | Find where your certificates (incl. wildcards) are installed |
+| `expiry ssl scan [-d DOMAIN] [-n NAME] [--names-file FILE\|-] [--network CIDR] [--discover] [--all-certs] [-p PORTS] [--wildcards] [--add]` | Find where certificates (incl. wildcards) are installed; with no options, on the networks it discovers |
+| `expiry ssl networks [--json]` | The networks the scheduled scan discovers, and why (connects to nothing) |
 | `expiry sync [-s entra\|ssl] [--dry-run]` | Import from sources now |
 | `expiry check [--dry-run]` | Send due notifications now |
 | `expiry test-notify [--to EMAIL]` | Send a sample email / webhook |
@@ -838,8 +844,67 @@ expiry ssl check expired.badssl.com               # inspect without saving
 
 ### Finding certificates automatically (`ssl scan`)
 
-Typing in every server is error-prone, especially for a **wildcard** certificate installed on
-several servers. `expiry ssl scan` finds them for you:
+**With no configuration at all, the weekly scan finds certificates by itself.** It is on by default
+(`sources.ssl.scan.enabled`, every Monday 05:00, plus once at first start) and needs no domain and
+no subnet list: it works out the **private networks this server can reach** and keeps **every
+certificate** it finds there, including the self-signed ones on printers, iLO/iDRAC consoles,
+switches, NAS boxes and appliances, which are the ones nobody tracks. New locations are tracked
+automatically and listed in one email.
+
+See what it would scan, and why, without connecting to anything:
+
+```bash
+expiry ssl networks
+```
+
+```text
+ Network          Why                                                     Scanned
+ 192.168.10.0/24  own subnet on eth0; default gateway 192.168.10.1 (eth0)  yes
+ 10.20.0.0/24     route via 10.8.0.1 on tun0                               yes
+ 10.1.1.0/24      DNS server 10.1.1.10                                     yes
+ 10.1.5.0/24      near erp.example.com                                     yes
+```
+
+Where the networks come from:
+
+| Source | Why it finds servers |
+|---|---|
+| this server's own subnets and routes (VPN tunnels to other sites included) | the servers next to this one |
+| the default gateway's subnet | the main LAN |
+| the subnet of each private DNS server in `/etc/resolv.conf` | domain controllers sit with the other servers |
+| the /24 around every host you already track | servers cluster: the neighbours of known ones are the likeliest unknown ones |
+
+Safety rules: only **private IPv4** (10/8, 172.16/12, 192.168/16) is ever discovered, never public
+addresses; a large LAN (a /16) is narrowed to this server's own /24 (`discover_prefix`); Docker's own
+bridge networks are skipped; and the total stays within the per-scan limit (most certain networks
+first). Exclude anything with `exclude_networks`. IPv6 is not discovered (a /64 cannot be swept).
+
+**Run the container with host networking for the best coverage.** On Docker's default bridge the
+container cannot see the server's own subnets and routes, so discovery falls back to the DNS servers
+and the hosts you track (`expiry ssl networks` says so). With host networking it sees everything the
+server sees: add `--network host` to `docker run`, or uncomment `network_mode: host` in
+`docker-compose.yml`.
+
+Configure it in `sources.ssl.scan`:
+
+```yaml
+sources:
+  ssl:
+    scan:
+      enabled: true              # weekly; false to switch the scan off
+      discover_networks: true    # work out the networks (false = only `networks` below)
+      exclude_networks: []       # never touch these, e.g. ["10.9.0.0/16"]
+      match: auto                # auto: every certificate when no domain is set, else only yours
+      domains: []                # optional: also guess names under these domains (see below)
+      ports: [443, 8443, 9443]   # add 636, 993, 587, 389 ... (STARTTLS is automatic)
+```
+
+> **Tell your network/security team before the first scan.** It opens a TLS handshake to every
+> address of each discovered network on each port, which intrusion-detection systems can flag. The
+> table above is exactly what to send them.
+
+**With a domain, the scan can also find servers by name** and on networks it cannot discover,
+which matters most for a **wildcard** certificate installed on several servers:
 
 ```bash
 expiry ssl scan --domain example.com                           # typical names + certificate logs

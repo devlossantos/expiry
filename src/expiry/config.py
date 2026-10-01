@@ -93,13 +93,18 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "timeout": 10,
             "hosts": [],
-            "scan": {                      # find where your certificates are installed
-                "enabled": False,
+            "scan": {                      # find where certificates are installed, on a schedule
+                "enabled": True,
                 "schedule": "0 5 * * 1",   # weekly, Monday 05:00
-                "domains": [],             # e.g. [example.com]: keep certificates issued for these
+                "discover_networks": True, # scan the private subnets this server can reach (no list needed)
+                "discover_prefix": 24,     # size of each discovered network (a /16 LAN -> this server's /24)
+                "exclude_networks": [],    # never scan these, e.g. ["10.9.0.0/16"]
+                "match": "auto",           # auto | all | domains: which certificates to keep (auto = all
+                                           # when no domain is set, else only those for your domains)
+                "domains": [],             # e.g. [example.com]: also guess names under these domains
                 "names": [],               # extra host names to try besides the built-in list
                 "names_file": "",          # file with more names (one per line, or a DNS export)
-                "networks": [],            # CIDR ranges to scan (opt-in), e.g. ["10.1.2.0/24"]
+                "networks": [],            # extra CIDR ranges to scan, e.g. ["10.1.2.0/24"]
                 "ports": [443, 8443, 9443],
                 "certificate_logs": True,  # also look up public names in crt.sh
                 "timeout": 3,
@@ -224,8 +229,18 @@ def validate(cfg: Config) -> tuple[list[str], list[str]]:
     config_targets(cfg, errors)  # every sources.ssl.hosts entry must be a valid host[:port]
 
     if cfg.get("sources.ssl.scan.enabled"):
-        if not cfg.get("sources.ssl.scan.domains"):
-            errors.append("sources.ssl.scan.domains: list at least one domain, e.g. [example.com]")
+        if not (cfg.get("sources.ssl.scan.domains") or cfg.get("sources.ssl.scan.networks")
+                or cfg.get("sources.ssl.scan.discover_networks", True)):
+            errors.append("sources.ssl.scan: nothing to scan: set discover_networks: true, or list "
+                          "domains / networks")
+        if str(cfg.get("sources.ssl.scan.match") or "auto").lower() not in ("auto", "all", "domains"):
+            errors.append("sources.ssl.scan.match: must be auto, all or domains")
+        if str(cfg.get("sources.ssl.scan.match") or "").lower() == "domains" and \
+                not cfg.get("sources.ssl.scan.domains"):
+            errors.append("sources.ssl.scan.match: 'domains' needs sources.ssl.scan.domains")
+        prefix = cfg.get("sources.ssl.scan.discover_prefix", 24)
+        if not isinstance(prefix, int) or not 16 <= prefix <= 30:
+            errors.append("sources.ssl.scan.discover_prefix: must be a number from 16 to 30 (24 = 256 addresses)")
         import ipaddress
         total = 0
         for net in cfg.get("sources.ssl.scan.networks") or []:
@@ -233,6 +248,11 @@ def validate(cfg: Config) -> tuple[list[str], list[str]]:
                 total += ipaddress.ip_network(str(net), strict=False).num_addresses
             except ValueError:
                 errors.append(f"sources.ssl.scan.networks: '{net}' is not a valid range (e.g. 10.1.2.0/24)")
+        for net in cfg.get("sources.ssl.scan.exclude_networks") or []:
+            try:
+                ipaddress.ip_network(str(net), strict=False)
+            except ValueError:
+                errors.append(f"sources.ssl.scan.exclude_networks: '{net}' is not a valid range")
         nf = cfg.get("sources.ssl.scan.names_file")
         if nf and not Path(nf).is_file():
             errors.append(f"sources.ssl.scan.names_file: file not found: {nf}")

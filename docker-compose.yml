@@ -6,6 +6,10 @@ services:
     image: ${EXPIRY_IMAGE:-ghcr.io/devlossantos/expiry:latest}
     container_name: expiry
     restart: unless-stopped
+    # Host networking lets the weekly certificate scan see this server's own subnets and routes
+    # (README: "Finding certificates automatically"). On the default bridge it still scans the
+    # networks of your DNS servers and tracked hosts. To use it, uncomment:
+    # network_mode: host
     env_file: /etc/expiry/expiry.env
     logging:                     # keep at most 5 x 10 MB of logs (docker logs expiry)
       driver: json-file

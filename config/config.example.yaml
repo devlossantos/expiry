@@ -145,11 +145,18 @@ sources:
 
     # Find where your certificates are installed (including wildcards on several servers) and
     # track them automatically. Only reads each server's certificate (a TLS handshake, like a
-    # browser); nothing else is sent. Try it first by hand: expiry ssl scan --domain example.com
+    # browser); nothing else is sent. See what it would scan: expiry ssl networks
     scan:
-      enabled: false
+      enabled: true                  # on by default: needs no domain or subnet list (see below)
       schedule: "0 5 * * 1"          # cron: weekly, Monday 05:00
-      domains: []                    # keep certificates issued for these, e.g. [example.com]
+      discover_networks: true        # scan the private subnets this server can reach: its own subnets
+                                     # and routes, the gateway's, the DNS servers', and those around the
+                                     # hosts you track. See them with: expiry ssl networks
+      discover_prefix: 24            # a large LAN (e.g. a /16) is narrowed to this server's own /24
+      exclude_networks: []           # never scan these, e.g. ["10.9.0.0/16"]
+      match: auto                    # auto: keep EVERY certificate when no domain is set (printers,
+                                     # consoles, appliances), else only yours | all | domains
+      domains: []                    # optional: also find servers by name under these, e.g. [example.com]
       names: []                      # extra host names to try besides the built-in ~180, e.g. [erp, hr-portal]
       names_file: ""                 # more names from a file in /etc/expiry, e.g. /config/scan-names.csv
                                      # (one per line, or a Windows DNS CSV / BIND export; see README)

@@ -885,6 +885,13 @@ and the hosts you track (`expiry ssl networks` says so). With host networking it
 server sees: add `--network host` to `docker run`, or uncomment `network_mode: host` in
 `docker-compose.yml`.
 
+**Ubuntu servers (systemd-resolved).** There `/etc/resolv.conf` lists only the local DNS cache
+`127.0.0.53`, and the real DNS servers are in `/run/systemd/resolve/resolv.conf`, which the tool
+reads instead. A container sees that file only if it is mounted: add
+`-v /run/systemd/resolve:/run/systemd/resolve:ro` to `docker run` (or the same line under
+`volumes:` in `docker-compose.yml`). If `expiry ssl networks` finds nothing, it lists what it
+checked and why each source came up empty.
+
 Configure it in `sources.ssl.scan`:
 
 ```yaml

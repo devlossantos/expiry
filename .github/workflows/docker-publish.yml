@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
 
 env:
-  TRIVY: aquasec/trivy:latest
+  TRIVY: aquasec/trivy:0.75.0  # pinned; bump deliberately
 
 jobs:
   test:
@@ -50,7 +50,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Python lint (ruff; rules in pyproject.toml)
-        run: pip install ruff && ruff check src tests
+        run: pip install ruff==0.16.9 && ruff check src tests
       - name: Shell script lint (shellcheck)
         run: shellcheck scripts/*.sh
 

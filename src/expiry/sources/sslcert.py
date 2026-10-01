@@ -131,18 +131,35 @@ def probe(host: str, port: int = 443, sni: str = "", timeout: float = 10.0, veri
     return info
 
 
-def config_targets(cfg: Config) -> list[Target]:
+def parse_config_entry(entry: Any) -> Target:
+    """One sources.ssl.hosts entry ("host", "host:port" or a mapping) -> Target. Raises ValueError."""
+    if isinstance(entry, dict):
+        if not entry.get("host"):
+            raise ValueError(f"entry without 'host': {entry}")
+        host, port = parse_host_port(str(entry["host"]))
+        if entry.get("port") not in (None, ""):
+            port = int(entry["port"])
+        target = Target(host, port, str(entry.get("sni") or ""), str(entry.get("name") or ""),
+                        str(entry.get("notes") or ""))
+    elif isinstance(entry, (str, int)) and str(entry).strip():
+        target = Target(*parse_host_port(str(entry)))
+    else:
+        raise ValueError(f"not a host: {entry!r}")
+    if not 0 < target.port < 65536:
+        raise ValueError(f"invalid port {target.port} in {entry!r}")
+    return target
+
+
+def config_targets(cfg: Config, errors: list[str] | None = None) -> list[Target]:
+    """Targets from sources.ssl.hosts. Invalid entries are skipped (and reported in `errors`), so one
+    typo doesn't stop the other hosts from being checked."""
     out: list[Target] = []
-    for entry in cfg.get("sources.ssl.hosts") or []:
-        if isinstance(entry, dict):
-            host, port = parse_host_port(str(entry.get("host", "")), int(entry.get("port") or 443))
-            if entry.get("port"):
-                port = int(entry["port"])
-            out.append(Target(host, port, entry.get("sni", "") or "", entry.get("name", "") or "",
-                              entry.get("notes", "") or ""))
-        else:
-            host, port = parse_host_port(str(entry))
-            out.append(Target(host, port))
+    for i, entry in enumerate(cfg.get("sources.ssl.hosts") or []):
+        try:
+            out.append(parse_config_entry(entry))
+        except (ValueError, TypeError) as exc:
+            if errors is not None:
+                errors.append(f"sources.ssl.hosts[{i}]: {exc}")
     return out
 
 
@@ -155,9 +172,9 @@ class SslSource:
         self.timeout = float(cfg.get("sources.ssl.timeout") or 10)
         self.tz = ZoneInfo(cfg.timezone)
 
-    def targets(self) -> list[Target]:
+    def targets(self, errors: list[str] | None = None) -> list[Target]:
         seen: dict[str, Target] = {}
-        for t in config_targets(self.cfg):
+        for t in config_targets(self.cfg, errors):
             seen[t.external_id] = t
         for t in self.store.ssl_targets():
             seen.setdefault(external_id(t.host, t.port, t.sni), Target(t.host, t.port, t.sni, t.name, t.notes))
@@ -174,7 +191,7 @@ class SslSource:
 
     def fetch(self) -> FetchResult:
         result = FetchResult()
-        targets = self.targets()
+        targets = self.targets(result.errors)
         if not targets:
             return result
 

@@ -24,8 +24,7 @@ from rich.text import Text
 from expiry import __version__
 from expiry.config import Config, load_config, masked, validate
 from expiry.db import Reminder, Store
-from expiry.util import (actor, describe_days, format_date, is_email, parse_date, parse_host_port, split_emails,
-                         today)
+from expiry.util import actor, describe_days, format_date, is_email, parse_date, parse_host_port, split_emails, today
 
 console = Console(highlight=False)
 err = Console(stderr=True, highlight=False)
@@ -849,7 +848,7 @@ def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_f
                     ("Tracked", {})]:
         t.add_column(col, overflow="fold", **kw)
     new: list = []
-    for i, (sha, locs) in enumerate(groups.items()):
+    for i, locs in enumerate(groups.values()):
         info = locs[0].info
         exp = info.not_after.astimezone(ZoneInfo(app.cfg.timezone)).date()
         for j, f in enumerate(locs):
@@ -1326,10 +1325,11 @@ def entra_cert_show(app: App, path: str | None, pem: bool) -> None:
 @cli.command()
 @click.option("-f", "--format", "fmt", type=click.Choice(["json", "csv"]), default="json", show_default=True)
 @click.option("-a", "--all", "show_all", is_flag=True, help="Include archived and ignored reminders.")
-@click.option("-o", "--output", type=click.File("w", encoding="utf-8"), default="-", help="File (default stdout).")
+@click.option("-o", "--output", type=click.File("w", encoding="utf-8"), default="-",
+              help="File INSIDE the container (default: stdout). To save on the server use: expiry export > file")
 @pass_app
 def export(app: App, fmt: str, show_all: bool, output) -> None:
-    """Export reminders as JSON or CSV, for example `expiry export > backup.json`."""
+    """Export reminders as JSON or CSV, for example `expiry export -f csv > reminders.csv`."""
     ref = app.today
     items = [r.to_dict(ref) for r in app.store.list(statuses=None if show_all else ("active",))]
     if fmt == "json":
@@ -1343,18 +1343,30 @@ def export(app: App, fmt: str, show_all: bool, output) -> None:
 
 
 @cli.command("import")
-@click.argument("file", type=click.File("r", encoding="utf-8-sig"))
+@click.argument("file")
 @click.option("--dry-run", is_flag=True, help="Validate and show what would be imported.")
 @pass_app
-def import_cmd(app: App, file, dry_run: bool) -> None:
+def import_cmd(app: App, file: str, dry_run: bool) -> None:
     """Import manual reminders from a JSON or CSV file ('-' for stdin).
 
     \b
     CSV needs a header row with at least: name,expires_on  (optional: notes,notify,muted)
+    Dates may be in your date_format (e.g. 31/12/2027), YYYY-MM-DD or +90d.
     JSON is a list of objects with the same keys (the output of `expiry export` works).
     Rows whose name + date already exist are skipped. Synced (entra/ssl) rows are skipped.
+    \b
+    The command runs inside the container, so pipe a file from the server:
+      expiry import - < reminders.csv
     """
-    text = file.read()
+    if file == "-":
+        text = sys.stdin.read()
+    else:
+        p = Path(file)
+        if not p.is_file():
+            raise click.BadParameter(f"{file} not found. The command runs inside the container: "
+                                     "pipe the file instead: expiry import - < " + p.name)
+        text = p.read_text(encoding="utf-8-sig")
+    text = text.lstrip("﻿")
     try:
         rows = json.loads(text) if text.lstrip().startswith(("[", "{")) else list(csv.DictReader(io.StringIO(text)))
     except (ValueError, csv.Error) as exc:
@@ -1370,7 +1382,7 @@ def import_cmd(app: App, file, dry_run: bool) -> None:
             continue
         name = (row.get("name") or "").strip()
         try:
-            expires = parse_date(str(row.get("expires_on") or row.get("date") or ""), ref)
+            expires = parse_date(str(row.get("expires_on") or row.get("date") or ""), ref, app.cfg.date_format)
         except ValueError as exc:
             raise click.ClickException(f"row {n}: {exc}") from exc
         if not name:

@@ -209,13 +209,20 @@ def validate(cfg: Config) -> tuple[list[str], list[str]]:
         errors.append(f"timezone: unknown timezone '{cfg.timezone}' (use an IANA name such as Europe/Dublin)")
 
     probe = date(2026, 12, 31)
+    fmt = cfg.date_format
     try:
-        if datetime.strptime(probe.strftime(cfg.date_format), cfg.date_format).date() != probe:
+        # a year is required (parsing without one is ambiguous and deprecated from Python 3.15)
+        if not any(y in fmt for y in ("%Y", "%y")) or \
+                datetime.strptime(probe.strftime(fmt), fmt).date() != probe:
             raise ValueError
     except ValueError:
-        errors.append(f"date_format: '{cfg.date_format}' must contain day, month and year, e.g. %d/%m/%Y")
+        errors.append(f"date_format: '{fmt}' must contain day, month and year, e.g. %d/%m/%Y")
 
     from apscheduler.triggers.cron import CronTrigger
+
+    from expiry.sources.sslcert import config_targets
+    config_targets(cfg, errors)  # every sources.ssl.hosts entry must be a valid host[:port]
+
     if cfg.get("sources.ssl.scan.enabled"):
         if not cfg.get("sources.ssl.scan.domains"):
             errors.append("sources.ssl.scan.domains: list at least one domain, e.g. [example.com]")

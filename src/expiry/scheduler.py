@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import signal
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from expiry import __version__, backup, health
 from expiry.checker import run_check
-from expiry.config import load_config, validate
+from expiry.config import DEFAULTS, load_config, validate
 from expiry.db import Store
 from expiry.sources import run_sync
 from expiry.util import today, utcnow_iso
@@ -52,6 +52,7 @@ def _job_check(config_path: str | None) -> None:
             log.exception("check failed")
             health.record(store, "notify", False, str(exc))
         _alerts(cfg, store)
+    _catch_up(config_path)
 
 
 def _job_backup(config_path: str | None) -> None:
@@ -79,6 +80,7 @@ def _job_scan(config_path: str | None) -> None:
     with Store(cfg.db_path) as store:
         if not (cfg.get("sources.ssl.enabled") and cfg.get("sources.ssl.scan.enabled")):
             return
+        store.kv_set("last_scan_attempt", utcnow_iso())
         try:
             result, added, new = sslscan.run_scheduled(cfg, store)
         except Exception as exc:  # noqa: BLE001
@@ -108,9 +110,48 @@ def _job_scan(config_path: str | None) -> None:
         _alerts(cfg, store)
 
 
+def _older_than(iso: str | None, hours: float) -> bool:
+    if not iso:
+        return True
+    try:
+        return datetime.now(timezone.utc) - datetime.fromisoformat(iso) > timedelta(hours=hours)
+    except ValueError:
+        return True
+
+
 def _job_startup(config_path: str | None) -> None:
     _job_sync(config_path)
-    _job_check(config_path)
+    _job_check(config_path)  # includes the catch-up below
+
+
+def _catch_up(config_path: str | None) -> None:
+    """Run a daily backup / weekly scan that was missed because the machine was off or asleep
+    (e.g. a PC that isn't on at 02:30). Called at start-up and after every check."""
+    cfg = load_config(config_path)
+    with Store(cfg.db_path) as store:
+        last_backup = (store.kv_get("last_backup") or {}).get("at")
+        # scans: the last *attempt*, so a failing scan isn't repeated every hour (it alerts instead)
+        last_scan = store.kv_get("last_scan_attempt") or (store.kv_get("last_scan") or {}).get("at")
+    if cfg.get("backup.enabled") and _older_than(last_backup, 24):
+        log.info("catching up: last backup %s", last_backup or "never")
+        _job_backup(config_path)
+    if cfg.get("sources.ssl.enabled") and cfg.get("sources.ssl.scan.enabled") and _older_than(last_scan, 7 * 24):
+        log.info("catching up: last certificate scan %s", last_scan or "never")
+        _job_scan(config_path)
+
+
+def cron_trigger(cfg, key: str, tz: ZoneInfo) -> CronTrigger:
+    """The schedule at config key; an invalid expression falls back to the default instead of
+    crashing the service (the error is logged and shown by `expiry config check`)."""
+    expr = cfg.get(key)
+    try:
+        return CronTrigger.from_crontab(str(expr), timezone=tz)
+    except ValueError as exc:
+        node = DEFAULTS
+        for part in key.split("."):
+            node = node[part]
+        log.error("%s: invalid cron expression '%s' (%s); using the default '%s'", key, expr, exc, node)
+        return CronTrigger.from_crontab(node, timezone=tz)
 
 
 def configure_logging(tz: ZoneInfo) -> logging.Formatter:
@@ -145,15 +186,13 @@ def run_daemon(config_path: str | None = None) -> None:
 
     sched = BlockingScheduler(timezone=tz, job_defaults={"coalesce": True, "max_instances": 1,
                                                          "misfire_grace_time": 3600})
-    sched.add_job(_job_sync, CronTrigger.from_crontab(cfg.get("schedule.sync"), timezone=tz),
-                  args=[config_path], id="sync", name="sync")
-    sched.add_job(_job_check, CronTrigger.from_crontab(cfg.get("schedule.check"), timezone=tz),
-                  args=[config_path], id="check", name="check")
+    sched.add_job(_job_sync, cron_trigger(cfg, "schedule.sync", tz), args=[config_path], id="sync", name="sync")
+    sched.add_job(_job_check, cron_trigger(cfg, "schedule.check", tz), args=[config_path], id="check", name="check")
     if cfg.get("backup.enabled"):
-        sched.add_job(_job_backup, CronTrigger.from_crontab(cfg.get("backup.schedule"), timezone=tz),
+        sched.add_job(_job_backup, cron_trigger(cfg, "backup.schedule", tz),
                       args=[config_path], id="backup", name="backup")
     if cfg.get("sources.ssl.enabled") and cfg.get("sources.ssl.scan.enabled"):
-        sched.add_job(_job_scan, CronTrigger.from_crontab(cfg.get("sources.ssl.scan.schedule"), timezone=tz),
+        sched.add_job(_job_scan, cron_trigger(cfg, "sources.ssl.scan.schedule", tz),
                       args=[config_path], id="scan", name="scan")
 
     def heartbeat() -> None:

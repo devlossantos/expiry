@@ -124,8 +124,18 @@ def run_check(cfg: Config, store: Store, today: date, dry_run: bool = False,
     if not email_on and not webhooks:
         result.errors.append("no notification channel configured (enable email or add a webhook)")
 
+    unreachable = [d for d in result.due if not webhooks and not (email_on and d.recipients)]
+    if unreachable and email_on:
+        result.errors.append(f"{len(unreachable)} due item(s) have no recipient: set notify.emails "
+                             f"(or --notify on the item): " + ", ".join(d.reminder.name for d in unreachable[:5]))
+
+    unreachable_ids = {d.reminder.id for d in unreachable}
     for d in result.due:
         rid = d.reminder.id
+        if rid in unreachable_ids:
+            # nobody to send to: report it (status, alerts) but don't add a 'failed' row every check
+            result.failed += 1
+            continue
         if ok[rid]:
             store.record_notification(d.reminder, d.stage, "sent", ok[rid], split_emails(sent_to[rid]),
                                       "; ".join(errs[rid]))

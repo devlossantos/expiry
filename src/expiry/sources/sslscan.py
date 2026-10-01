@@ -189,7 +189,7 @@ def scan(domains: list[str], names: list[str] | None = None, networks: list[str]
         candidates.update(name_candidates(d, names, use_logs, result.warnings))
     result.names_checked = len(candidates)
     with ThreadPoolExecutor(workers) as pool:
-        resolved = dict(zip(candidates, pool.map(resolver, candidates)))
+        resolved = dict(zip(candidates, pool.map(resolver, candidates), strict=True))
     name_tasks = [(host, ip, port, candidates[host]) for host, ips in resolved.items() for ip in ips[:4]
                   for port in ports]
 
@@ -244,7 +244,7 @@ def tracked_state(targets: list[Target], resolver=None) -> tuple[set[str], set[t
     ids = {t.external_id for t in targets}
     with ThreadPoolExecutor(16) as pool:
         addrs = list(pool.map(lambda t: [t.host] if _is_ip(t.host) else resolver(t.host), targets))
-    return ids, {(a, t.port) for t, ips in zip(targets, addrs) for a in ips}
+    return ids, {(a, t.port) for t, ips in zip(targets, addrs, strict=True) for a in ips}
 
 
 def _is_ip(host: str) -> bool:

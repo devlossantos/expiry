@@ -105,12 +105,33 @@ def find_due(cfg: Config, store: Store, today: date) -> list[DueItem]:
     return due
 
 
+CHECK_LOCK_SECONDS = 15 * 60
+
+
 def run_check(cfg: Config, store: Store, today: date, dry_run: bool = False,
               email_sender: EmailSender | None = None, webhook_sender=send_webhook) -> CheckResult:
+    """Send what is due. Only one check runs at a time across processes: the daemon's 08:00 run and
+    an `expiry check` typed at the same moment would otherwise both find the same items due and
+    both send them, because a notification is recorded only after it has been delivered."""
+    if dry_run:
+        return CheckResult(due=find_due(cfg, store, today))
+    import os
+
+    if not store.acquire_lock("check", CHECK_LOCK_SECONDS, owner=f"pid {os.getpid()}"):
+        result = CheckResult()
+        result.errors.append("another check is running right now; nothing was sent by this one")
+        return result
+    try:
+        return _run_check(cfg, store, today, email_sender, webhook_sender)
+    finally:
+        store.release_lock("check")
+
+
+def _run_check(cfg: Config, store: Store, today: date, email_sender: EmailSender | None,
+               webhook_sender) -> CheckResult:
     result = CheckResult(due=find_due(cfg, store, today))
-    if dry_run or not result.due:
-        if not dry_run:
-            store.kv_set("last_check", {"at": utcnow_iso(), "result": result.summary()})
+    if not result.due:
+        store.kv_set("last_check", {"at": utcnow_iso(), "result": result.summary()})
         return result
 
     email_on = bool(cfg.get("email.enabled"))

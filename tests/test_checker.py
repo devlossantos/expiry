@@ -205,3 +205,40 @@ def test_a_version_1_database_is_migrated(tmp_path):
         cols = {r["name"] for r in s.conn.execute("PRAGMA table_info(notifications)")}
         assert "keys" in cols
         assert s.conn.execute("PRAGMA user_version").fetchone()[0] >= 2
+
+
+def test_two_checks_at_once_cannot_both_send(store, cfg):
+    store.add("Once only", TODAY + timedelta(days=1), "t")
+    assert store.acquire_lock("check", 900, "another process")
+    sender = FakeSender()
+    res = run_check(cfg, store, TODAY, email_sender=sender)
+    assert sender.sent == [] and "another check is running" in res.errors[0]
+    store.release_lock("check")
+    assert run_check(cfg, store, TODAY, email_sender=sender).sent == 1
+
+
+def test_an_abandoned_lock_expires(store):
+    assert store.acquire_lock("check", -1, "crashed")  # already expired
+    assert store.acquire_lock("check", 900, "next run")
+    assert not store.acquire_lock("check", 900, "third")
+
+
+def test_message_id_uses_the_senders_domain(cfg, monkeypatch):
+    import smtplib
+
+    from expiry.notify import EmailSender, Rendered
+
+    sent = []
+
+    class FakeSMTP:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def ehlo(self): pass
+        def starttls(self, **k): pass
+        def login(self, *a): pass
+        def send_message(self, m): sent.append(m)
+
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    EmailSender(cfg).send(["ops@example.com"], Rendered("s", "<p>h</p>", "t"))
+    assert sent[0]["Message-ID"].endswith("@example.com>")

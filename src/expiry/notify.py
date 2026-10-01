@@ -132,7 +132,10 @@ class EmailSender:
         em["From"] = self.cfg.get("email.from")
         em["To"] = ", ".join(to)
         em["Date"] = formatdate(localtime=True)
-        em["Message-ID"] = make_msgid(domain="expiry.local")
+        # the sender's own domain: a Message-ID on a made-up domain such as expiry.local is a
+        # (small) spam signal, and DMARC-strict receivers notice
+        sender_domain = str(self.cfg.get("email.from") or "").rpartition("@")[2].strip(" >") or "expiry.local"
+        em["Message-ID"] = make_msgid(domain=sender_domain)
         em.set_content(msg.text)
         em.add_alternative(msg.html, subtype="html")
         host, port, timeout = c["host"], int(c.get("port") or 587), int(c.get("timeout") or 30)

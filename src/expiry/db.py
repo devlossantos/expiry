@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -480,6 +480,34 @@ class Store:
     def kv_get(self, key: str, default: Any = None) -> Any:
         row = self.conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
         return json.loads(row["value"]) if row else default
+
+    def acquire_lock(self, name: str, ttl_seconds: int, owner: str = "") -> bool:
+        """Take a named lock shared by every process using this database (the daemon and any
+        `expiry` command run by hand). False if someone else holds it. A lock left behind by a
+        crashed process expires after ttl_seconds, so it can never wedge the service."""
+        key = f"lock:{name}"
+        now = datetime.now(timezone.utc)
+        self.conn.execute("BEGIN IMMEDIATE")  # serialises the read-then-write across processes
+        try:
+            row = self.conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+            if row:
+                held = json.loads(row["value"])
+                if datetime.fromisoformat(held.get("until", "1970-01-01T00:00:00+00:00")) > now:
+                    self.conn.rollback()
+                    return False
+            value = json.dumps({"until": (now + timedelta(seconds=ttl_seconds)).isoformat(), "owner": owner})
+            self.conn.execute(
+                "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def release_lock(self, name: str) -> None:
+        self.kv_delete(f"lock:{name}")
 
     def kv_delete(self, key: str) -> None:
         with self.conn:

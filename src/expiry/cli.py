@@ -355,7 +355,7 @@ def show(app: App, rid: int, as_json: bool) -> None:
     if history:
         console.print("\n[bold]Recent notifications[/bold]")
         for h in history:
-            style = "green" if h["status"] == "sent" else "red"
+            style = {"sent": "green", "partial": "yellow"}.get(h["status"], "red")
             console.print(f"  {local_time(h['created_at'], app.cfg)}  stage {h['stage']:>2}d  "
                           f"[{style}]{h['status']}[/{style}]  {escape(h['channels'] or '')} "
                           f"{escape(h['error'] or '')}")
@@ -1130,7 +1130,7 @@ def history(app: App, rid: int | None, limit: int, as_json: bool) -> None:
     for col in ("When", "ID", "Reminder", "Expires", "Stage", "Status", "Channels", "Recipients / error"):
         t.add_column(col, overflow="fold")
     for r in rows:
-        style = "green" if r["status"] == "sent" else "red"
+        style = {"sent": "green", "partial": "yellow"}.get(r["status"], "red")
         t.add_row(local_time(r["created_at"], app.cfg), str(r["reminder_id"] or "-"),
                   Text(r["reminder_name"]), app.fmt(r["expires_on"]), f"{r['stage']}d", Text(r["status"], style=style),
                   r["channels"] or "-", Text(r["error"] if r["status"] != "sent" else r["recipients"]))

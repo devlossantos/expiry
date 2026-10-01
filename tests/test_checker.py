@@ -121,3 +121,87 @@ def test_default_template_renders(store, cfg):
     assert "Expires: 28/09/2026" in out.text  # Irish date format by default
     assert "Monday, 28 September 2026" in out.html
     assert "30/09/2026" in out.html  # "sent on" date
+
+
+HOOK = {"url": "https://hook.example/secret-token", "format": "teams"}
+
+
+def test_email_failure_is_retried_even_when_a_webhook_worked(store):
+    """The bug this replaced: one channel succeeding marked the reminder 'sent', so a broken SMTP
+    password stopped every email for as long as a webhook worked, and no alert fired."""
+    cfg = make_config(notify__emails=["ops@example.com"], email__smtp__host="localhost",
+                      email__from="expiry@example.com", notify__webhooks=[HOOK])
+    store.add("Payroll API secret", TODAY + timedelta(days=10), "t")
+    hook_calls = []
+
+    res = run_check(cfg, store, TODAY, email_sender=FakeSender(fail=True),
+                    webhook_sender=lambda h, items: hook_calls.append(items))
+    assert res.failed == 1 and res.sent == 0, "a partial delivery must count as a failure"
+    assert store.history()[0]["status"] == "partial"
+    assert len(hook_calls) == 1
+
+    # next check: the email is retried, the webhook is NOT repeated
+    sender = FakeSender()
+    res = run_check(cfg, store, TODAY, email_sender=sender, webhook_sender=lambda h, items: hook_calls.append(items))
+    assert res.sent == 1 and res.failed == 0
+    assert [to for to, _ in sender.sent] == [["ops@example.com"]]
+    assert len(hook_calls) == 1, "the webhook already had this stage"
+    # and then it is complete
+    assert run_check(cfg, store, TODAY, email_sender=FakeSender(), webhook_sender=lambda h, i: None).due == []
+
+
+def test_partial_failure_raises_the_self_monitoring_alert_state(store):
+    from expiry import health
+
+    cfg = make_config(notify__emails=["ops@example.com"], email__smtp__host="localhost",
+                      email__from="expiry@example.com", notify__webhooks=[HOOK])
+    store.add("X", TODAY + timedelta(days=1), "t")
+    run_check(cfg, store, TODAY, email_sender=FakeSender(fail=True), webhook_sender=lambda h, i: None)
+    assert health.problems(store)["notify"]["failures"] == 1
+
+
+def test_only_the_failed_recipient_is_retried(store):
+    """Two recipients in separate digest emails: one fails, only that one is sent again."""
+    cfg = make_config(notify__emails=["ops@example.com"], notify__mode="digest",
+                      email__smtp__host="localhost", email__from="expiry@example.com")
+    store.add("A", TODAY + timedelta(days=1), "t")
+    store.add("B", TODAY + timedelta(days=1), "t", notify=["Dev@Example.com"])
+
+    class FailFor(FakeSender):
+        def send(self, to, msg):
+            if "dev@example.com" in [a.lower() for a in to]:
+                raise ConnectionError("mailbox full")
+            self.sent.append((to, msg))
+
+    first = FailFor()
+    res = run_check(cfg, store, TODAY, email_sender=first)
+    assert res.failed == 1  # B reached ops but not dev
+    retry = FakeSender()
+    res = run_check(cfg, store, TODAY, email_sender=retry)
+    assert [sorted(a.lower() for a in to) for to, _ in retry.sent] == [["dev@example.com"]]
+    assert res.sent == 1 and res.failed == 0
+
+
+def test_webhook_url_is_never_stored(store):
+    cfg = make_config(email__enabled=False, notify__webhooks=[HOOK])
+    store.add("Hooked", TODAY + timedelta(days=1), "t")
+    run_check(cfg, store, TODAY, webhook_sender=lambda h, i: None)
+    row = store.conn.execute("SELECT * FROM notifications").fetchone()
+    assert "secret-token" not in " ".join(str(v) for v in dict(row).values())
+
+
+def test_a_version_1_database_is_migrated(tmp_path):
+    import sqlite3
+
+    from expiry.db import SCHEMA, Store
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA)
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+    with Store(str(path)) as s:
+        cols = {r["name"] for r in s.conn.execute("PRAGMA table_info(notifications)")}
+        assert "keys" in cols
+        assert s.conn.execute("PRAGMA user_version").fetchone()[0] >= 2

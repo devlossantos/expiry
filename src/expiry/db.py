@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 from expiry.util import split_emails, utcnow_iso
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS reminders (
@@ -72,6 +72,14 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT NOT NULL
 );
 """
+
+
+# Schema changes after version 1, keyed by the version they produce.
+MIGRATIONS: dict[int, list[str]] = {
+    # 2: which destinations (email:<address>, webhook:<format>:<hash>) each notification reached, so a
+    #    partly failed delivery retries only what failed
+    2: ["ALTER TABLE notifications ADD COLUMN keys TEXT NOT NULL DEFAULT ''"],
+}
 
 
 @dataclass
@@ -169,11 +177,23 @@ class Store:
         self.close()
 
     def _migrate(self) -> None:
+        """Bring the database up to SCHEMA_VERSION, one numbered step at a time.
+
+        A fresh database gets SCHEMA (version 1) and then every step after it, so new and upgraded
+        databases end up identical. To change the schema: append a step to MIGRATIONS and bump
+        SCHEMA_VERSION. Never edit a step that has shipped; existing databases have already run it.
+        """
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:
             with self.conn:
                 self.conn.executescript(SCHEMA)
-                self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                self.conn.execute("PRAGMA user_version = 1")
+            version = 1
+        for target in range(version + 1, SCHEMA_VERSION + 1):
+            with self.conn:
+                for statement in MIGRATIONS[target]:
+                    self.conn.execute(statement)
+                self.conn.execute(f"PRAGMA user_version = {target}")
 
     # ------------------------------------------------------------------ reminders
 
@@ -408,16 +428,26 @@ class Store:
         )
         return {r["stage"] for r in rows}
 
+    def delivered_keys(self, rid: int, expires_on: date, stage: int) -> set[str]:
+        """Destinations that already received this stage in an earlier, partly failed attempt."""
+        rows = self.conn.execute(
+            "SELECT keys FROM notifications WHERE reminder_id = ? AND expires_on = ? AND stage = ? "
+            "AND status IN ('sent', 'partial')",
+            (rid, expires_on.isoformat(), stage),
+        )
+        return {k for r in rows for k in (r["keys"] or "").split(",") if k}
+
     def record_notification(
-        self, r: Reminder, stage: int, status: str, channels: list[str], recipients: list[str], error: str = ""
+        self, r: Reminder, stage: int, status: str, channels: list[str], recipients: list[str], error: str = "",
+        keys: list[str] | None = None,
     ) -> None:
         with self.conn:
             self.conn.execute(
                 """INSERT INTO notifications (reminder_id, reminder_name, expires_on, stage, status, channels,
-                                              recipients, error, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                              recipients, error, created_at, keys)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (r.id, r.name, r.expires_on.isoformat(), stage, status, ",".join(channels), ",".join(recipients),
-                 error, utcnow_iso()),
+                 error, utcnow_iso(), ",".join(keys or [])),
             )
 
     def history(self, limit: int = 50, rid: int | None = None) -> list[sqlite3.Row]:

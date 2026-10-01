@@ -99,7 +99,9 @@ Microsoft (Entra, email), the SSL hosts you track and any subnets you want to sc
   at this size.
 * **Notifications are idempotent.** Each stage (30/14/1/0 days) is sent **once** per reminder and
   expiry date, so restarts or extra `expiry check` runs never produce duplicate emails. Failed
-  deliveries are retried at the next check. Renewing an item (a new date) starts the cycle over.
+  deliveries are retried at the next check, **per destination**: if the email fails but a Teams
+  webhook works, the next check retries only the email, and the failure still raises a
+  self-monitoring alert (`expiry history` shows it as *partial*). Renewing an item (a new date) starts the cycle over.
   An item added late, for example with 5 days left, gets a single email for the tightest stage
   instead of three.
 

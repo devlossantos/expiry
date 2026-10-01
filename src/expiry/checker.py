@@ -7,10 +7,18 @@ A reminder is due for the tightest stage it has reached (e.g. 10 days left -> st
 stage is sent at most once per expiry date; sending a tighter stage suppresses the looser ones, so a
 reminder added with 5 days left gets exactly one email, not three. Renewing a reminder (new date)
 starts the cycle again. Failed deliveries are retried on the next check.
+
+Delivery is tracked per DESTINATION (each email address, each webhook), not per reminder. A stage
+is complete only when every destination has it. If the email fails while a Teams webhook works,
+the notification is recorded as "partial", the next check retries the email alone (the webhook is
+not repeated), and the run counts as a failure for self-monitoring. Before this, any one channel
+succeeding marked the reminder "sent": a broken SMTP password silently stopped every email for
+as long as a webhook kept working, and no alert fired because nothing counted as failed.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import date
@@ -41,6 +49,11 @@ class DueItem:
     reminder: Reminder
     stage: int
     recipients: list[str]
+    # destinations that already have this stage (from an earlier, partly failed attempt)
+    delivered: set[str] = field(default_factory=set)
+
+    def pending_recipients(self) -> list[str]:
+        return [a for a in self.recipients if email_key(a) not in self.delivered]
 
 
 @dataclass
@@ -52,6 +65,24 @@ class CheckResult:
 
     def summary(self) -> dict:
         return {"due": len(self.due), "sent": self.sent, "failed": self.failed, "errors": self.errors}
+
+
+def email_key(address: str) -> str:
+    return f"email:{address.strip().lower()}"
+
+
+def webhook_key(hook: dict) -> str:
+    """Stable id for a webhook: its format plus a short hash of the URL (which embeds a secret, so
+    the URL itself is never stored)."""
+    digest = hashlib.sha256(str(hook.get("url", "")).encode()).hexdigest()[:10]
+    return f"webhook:{hook.get('format', 'generic')}:{digest}"
+
+
+def required_keys(cfg: Config, d: DueItem) -> set[str]:
+    keys = {webhook_key(h) for h in (cfg.get("notify.webhooks") or [])}
+    if cfg.get("email.enabled"):
+        keys |= {email_key(a) for a in d.recipients}
+    return keys
 
 
 def recipients_for(cfg: Config, r: Reminder) -> list[str]:
@@ -70,7 +101,7 @@ def find_due(cfg: Config, store: Store, today: date) -> list[DueItem]:
             continue
         if any(s <= stage for s in store.sent_stages(r.id, r.expires_on)):
             continue
-        due.append(DueItem(r, stage, recipients_for(cfg, r)))
+        due.append(DueItem(r, stage, recipients_for(cfg, r), store.delivered_keys(r.id, r.expires_on, stage)))
     return due
 
 
@@ -87,18 +118,17 @@ def run_check(cfg: Config, store: Store, today: date, dry_run: bool = False,
     renderer = Renderer(cfg)
     sender = email_sender or EmailSender(cfg)
 
-    ok: dict[int, list[str]] = {d.reminder.id: [] for d in result.due}       # reminder id -> channels delivered
+    delivered_now: dict[int, set[str]] = {d.reminder.id: set() for d in result.due}
     errs: dict[int, list[str]] = {d.reminder.id: [] for d in result.due}
-    sent_to: dict[int, list[str]] = {d.reminder.id: [] for d in result.due}
 
     if email_on:
         for recipients, batch in _email_batches(cfg, result.due):
             ctx = [item_context(d.reminder, today, d.stage, cfg.date_format) for d in batch]
             try:
                 sender.send(recipients, renderer.render(ctx, today, certificate_group(batch)))
+                sent_keys = {email_key(a) for a in recipients}
                 for d in batch:
-                    ok[d.reminder.id].append("email")
-                    sent_to[d.reminder.id].extend(recipients)
+                    delivered_now[d.reminder.id] |= sent_keys & {email_key(a) for a in d.recipients}
                 log.info("emailed %s about %s", ", ".join(recipients), ", ".join(d.reminder.name for d in batch))
             except Exception as exc:  # noqa: BLE001
                 msg = f"email to {', '.join(recipients)} failed: {exc}"
@@ -107,19 +137,21 @@ def run_check(cfg: Config, store: Store, today: date, dry_run: bool = False,
                 for d in batch:
                     errs[d.reminder.id].append(msg)
 
-    if webhooks:
-        ctx = [item_context(d.reminder, today, d.stage, cfg.date_format) for d in result.due]
-        for hook in webhooks:
-            try:
-                webhook_sender(hook, ctx)
-                for d in result.due:
-                    ok[d.reminder.id].append(f"webhook:{hook.get('format', 'generic')}")
-            except Exception as exc:  # noqa: BLE001
-                msg = f"webhook {hook.get('format', 'generic')} failed: {exc}"
-                log.error(msg)
-                result.errors.append(msg)
-                for d in result.due:
-                    errs[d.reminder.id].append(msg)
+    for hook in webhooks:
+        key = webhook_key(hook)
+        pending = [d for d in result.due if key not in d.delivered]
+        if not pending:
+            continue
+        try:
+            webhook_sender(hook, [item_context(d.reminder, today, d.stage, cfg.date_format) for d in pending])
+            for d in pending:
+                delivered_now[d.reminder.id].add(key)
+        except Exception as exc:  # noqa: BLE001
+            msg = f"webhook {hook.get('format', 'generic')} failed: {exc}"
+            log.error(msg)
+            result.errors.append(msg)
+            for d in pending:
+                errs[d.reminder.id].append(msg)
 
     if not email_on and not webhooks:
         result.errors.append("no notification channel configured (enable email or add a webhook)")
@@ -136,13 +168,24 @@ def run_check(cfg: Config, store: Store, today: date, dry_run: bool = False,
             # nobody to send to: report it (status, alerts) but don't add a 'failed' row every check
             result.failed += 1
             continue
-        if ok[rid]:
-            store.record_notification(d.reminder, d.stage, "sent", ok[rid], split_emails(sent_to[rid]),
-                                      "; ".join(errs[rid]))
+        now = delivered_now[rid]
+        missing = required_keys(cfg, d) - d.delivered - now
+        if not missing:
+            status = "sent"
+        elif now or d.delivered:
+            status = "partial"   # some destinations have it; the next check retries only the rest
+        else:
+            status = "failed"
+        channels = sorted({k.split(":", 1)[0] if k.startswith("email:") else k.rsplit(":", 1)[0] for k in now})
+        store.record_notification(
+            d.reminder, d.stage, status, channels,
+            [k.split(":", 1)[1] for k in sorted(now) if k.startswith("email:")],
+            "; ".join(errs[rid]) or ("no channel delivered" if status == "failed" else ""),
+            keys=sorted(now),
+        )
+        if status == "sent":
             result.sent += 1
         else:
-            store.record_notification(d.reminder, d.stage, "failed", [], d.recipients,
-                                      "; ".join(errs[rid]) or "no channel delivered")
             result.failed += 1
 
     store.kv_set("last_check", {"at": utcnow_iso(), "result": result.summary()})
@@ -162,22 +205,25 @@ def certificate_group(batch: list[DueItem]) -> dict | None:
 
 
 def _email_batches(cfg: Config, due: list[DueItem]) -> list[tuple[list[str], list[DueItem]]]:
-    with_recipients = [d for d in due if d.recipients]
+    """Recipient lists and the items each one gets. Only addresses that do not have the stage yet
+    are included, so a retry after a partial failure never emails the same person twice."""
+    with_recipients = [d for d in due if d.pending_recipients()]
     if cfg.get("notify.mode") != "digest":
         # one email per reminder, except servers sharing the same certificate (e.g. a wildcard on
         # several servers) at the same stage: one email listing all of them
         batches: dict[tuple, tuple[list[str], list[DueItem]]] = {}
         for d in with_recipients:
             sha = d.reminder.meta.get("sha256") if d.reminder.source == "ssl" else None
-            key = ("cert", sha, d.stage, tuple(sorted(a.lower() for a in d.recipients))) if sha \
+            pending = d.pending_recipients()
+            key = ("cert", sha, d.stage, tuple(sorted(a.lower() for a in pending))) if sha \
                 else ("item", d.reminder.id)
-            batches.setdefault(key, (d.recipients, []))[1].append(d)
+            batches.setdefault(key, (pending, []))[1].append(d)
         return list(batches.values())
     # digest: each recipient gets one email with every item relevant to them;
     # recipients who would receive the exact same list share one email.
     per_person: dict[str, list[DueItem]] = {}
     for d in with_recipients:
-        for addr in d.recipients:
+        for addr in d.pending_recipients():
             per_person.setdefault(addr.lower(), []).append(d)
     grouped: dict[tuple[int, ...], tuple[list[str], list[DueItem]]] = {}
     for addr, items in per_person.items():

@@ -759,7 +759,7 @@ Every command has `--help`, and `expiry help <command>` works too.
 | `expiry rm ID [ID...] [-y]` | Remove (manual: delete; synced: ignore). Aliases `remove`, `delete` |
 | `expiry restore ID` | Un-ignore / un-archive |
 | `expiry ssl add HOST[:PORT]... [--sni NAME] [--name] [-n NOTES] [-f]` | Track certificates of domains/IPs |
-| `expiry ssl list` · `ssl rm TARGET` · `ssl check HOST` · `ssl discover DOMAIN [--add]` | Manage / inspect / discover SSL targets |
+| `expiry ssl list` · `ssl rm TARGET` · `ssl check HOST [--starttls PROTO]` · `ssl discover DOMAIN [--add]` | Manage / inspect / discover SSL targets |
 | `expiry ssl scan [-d DOMAIN] [-n NAME] [--names-file FILE\|-] [--network CIDR] [-p PORTS] [--wildcards] [--add]` | Find where your certificates (incl. wildcards) are installed |
 | `expiry sync [-s entra\|ssl] [--dry-run]` | Import from sources now |
 | `expiry check [--dry-run]` | Send due notifications now |
@@ -930,8 +930,14 @@ Notes:
   intrusion-detection systems may flag it. The server needs firewall access to each subnet and
   port: see [Network access](#network-access-firewall-rules). Limit: 65,536 address × port
   combinations per scan.
-* Ports must speak TLS directly (443, 8443, 993 IMAPS, 995, 465, 636 LDAPS...). STARTTLS ports
-  (25/587 SMTP, 143 IMAP, 389 LDAP) are not supported yet.
+* **STARTTLS is automatic on the usual plain-text ports**: SMTP 25/587, IMAP 143, POP3 110, FTP 21,
+  LDAP 389 and PostgreSQL 5432 are asked to upgrade to TLS before the certificate is read. Add those
+  ports to `ports` (or `ssl add mail.example.com:587`) to track mail relay and LDAP certificates. On a
+  non-standard port, set `starttls: smtp` (etc.) on the host entry, or `expiry ssl check HOST:2525
+  --starttls smtp`. Direct-TLS ports (443, 8443, 993, 995, 465, 636) need nothing.
+* **Old devices are read too.** Printers, iLO/iDRAC consoles, switches and appliances that only
+  speak TLS 1.0/1.1 or weak ciphers are retried with a legacy handshake, which is only ever used to
+  read the certificate. `expiry ssl check` marks them *outdated*.
 * Run it where the servers are reachable (your Linux server on the company network). From
   elsewhere only public hosts are found.
 
@@ -1034,7 +1040,6 @@ Register the class in [sources/\_\_init\_\_.py](src/expiry/sources/__init__.py) 
 `sources.<name>` block to the config. Sync, archiving, notifications, the CLI and history then
 work for it automatically. Good candidates:
 
-* **STARTTLS services** in `ssl scan`/`ssl add` (SMTP 25/587, IMAP 143, LDAP 389, databases)
 * **Domain registrations** via RDAP (the modern WHOIS): renewal dates of `example.com` itself
 * Azure Key Vault secrets/certificates (`expires` attribute)
 * AWS IAM access keys / ACM certificates

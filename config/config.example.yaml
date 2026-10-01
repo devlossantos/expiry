@@ -137,6 +137,11 @@ sources:
     #    sni: portal.example.com
     #    name: "Portal VIP (F5)"
     #    notes: "cert lives on the load balancer"
+    #  - mail.example.com:587           # SMTP submission: STARTTLS is used automatically (also 25,
+    #                                   # 143 IMAP, 110 POP3, 21 FTP, 389 LDAP, 5432 PostgreSQL)
+    #  - host: relay.example.com        # STARTTLS on a non-standard port: say which protocol
+    #    port: 2525
+    #    starttls: smtp
 
     # Find where your certificates are installed (including wildcards on several servers) and
     # track them automatically. Only reads each server's certificate (a TLS handshake, like a
@@ -150,7 +155,7 @@ sources:
                                      # (one per line, or a Windows DNS CSV / BIND export; see README)
       networks: []                   # also scan these ranges, e.g. ["10.1.2.0/24", "10.1.3.0/24"]
                                      # (opt-in: tell your network/security team; max 65536 address x port)
-      ports: [443, 8443, 9443]       # add app ports, e.g. 993 (IMAPS), 636 (LDAPS), 5001; STARTTLS not supported
+      ports: [443, 8443, 9443]       # add more, e.g. 993 IMAPS, 636 LDAPS, 587 SMTP, 389 LDAP (STARTTLS is automatic)
       certificate_logs: true         # also look up public host names in crt.sh
       timeout: 3                     # seconds per connection
       add: true                      # track what is found automatically (false = only email a report)

@@ -633,15 +633,18 @@ def ssl_rm(app: App, target: str, sni: str) -> None:
 @click.argument("target", metavar="HOST[:PORT]")
 @click.option("--sni", default="", help="Server name to request (useful for IPs).")
 @click.option("--timeout", default=10.0, show_default=True, help="Connection timeout in seconds.")
+@click.option("--starttls", default=None, metavar="PROTOCOL",
+              help="Upgrade with STARTTLS first: smtp, imap, pop3, ftp, ldap, postgres, or none. "
+                   "Default: chosen from the port (25/587 smtp, 143 imap, 110 pop3, 21 ftp, 389 ldap, 5432 postgres).")
 @click.option("--json", "as_json", is_flag=True, help="Output JSON.")
 @pass_app
-def ssl_check(app: App, target: str, sni: str, timeout: float, as_json: bool) -> None:
+def ssl_check(app: App, target: str, sni: str, timeout: float, starttls: str | None, as_json: bool) -> None:
     """Inspect the certificate of a host right now (nothing is saved)."""
     from expiry.sources.sslcert import probe
 
     host, port = parse_host_port(target)
     try:
-        info = probe(host, port, sni, timeout, verify=True)
+        info = probe(host, port, sni, timeout, verify=True, starttls=starttls.lower() if starttls else None)
     except Exception as exc:  # noqa: BLE001
         raise click.ClickException(f"{host}:{port}: {exc}") from exc
     days = (info.not_after.date() - datetime.now(timezone.utc).date()).days
@@ -661,6 +664,9 @@ def ssl_check(app: App, target: str, sni: str, timeout: float, as_json: bool) ->
               Text(f"no — {info.verify_error}" if info.trusted is False else f"unknown — {info.verify_error}",
                    style="yellow"))
     t.add_row("SANs", Text(", ".join(info.san[:20]) + (f" … (+{len(info.san) - 20})" if len(info.san) > 20 else "")))
+    t.add_row("Protocol", Text(f"{info.tls_version}" + (f" via STARTTLS ({info.starttls})" if info.starttls else ""))
+              + (Text("  outdated: the server only accepted an old TLS version or weak ciphers", style="yellow")
+                 if info.legacy_tls else Text("")))
     t.add_row("Serial", info.serial)
     t.add_row("SHA-256", info.sha256)
     console.print(t)

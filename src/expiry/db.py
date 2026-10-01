@@ -408,6 +408,15 @@ class Store:
         ).fetchone()
         return SslTarget(**dict(row)) if row else None
 
+    def name_ssl_target(self, tid: int, name: str, actor: str) -> bool:
+        """Give an unnamed target a name (a later scan identified it). Never renames a named one,
+        which may have been named by hand. Returns whether it changed."""
+        with self.conn:
+            cur = self.conn.execute("UPDATE ssl_targets SET name = ? WHERE id = ? AND name = ''", (name, tid))
+            if cur.rowcount:
+                self._audit(actor, "ssl-name", None, f"target {tid}: {name}")
+        return bool(cur.rowcount)
+
     def get_ssl_target(self, tid: int) -> SslTarget | None:
         row = self.conn.execute("SELECT * FROM ssl_targets WHERE id = ?", (tid,)).fetchone()
         return SslTarget(**dict(row)) if row else None

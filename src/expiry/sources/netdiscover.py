@@ -37,6 +37,7 @@ from pathlib import Path
 SKIP_INTERFACE_PREFIXES = ("lo", "docker", "br-", "veth", "virbr", "cni", "flannel", "cali", "cilium",
                            "kube", "vxlan", "weave", "podman", "lxc", "lxd")
 CGNAT = ipaddress.ip_network("100.64.0.0/10")
+SYSTEMD_RESOLV = "/run/systemd/resolve/resolv.conf"
 PRIVATE_V4 = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
 
 
@@ -193,7 +194,12 @@ def discover(known_hosts: list[str] | None = None, prefix: int = 24, exclude: li
                 warnings.append(f"{net} on {iface} is larger than /{prefix} and this server has no address "
                                 "in it, so it was skipped; list the parts you want in sources.ssl.scan.networks")
 
-    for ns in read_nameservers(resolv_file):
+    servers = read_nameservers(resolv_file)
+    if servers and all(ns.is_loopback for ns in servers):
+        # systemd-resolved (Ubuntu) puts its local stub 127.0.0.53 here; the real servers are
+        # in its own file, visible to a container only if /run/systemd/resolve is mounted
+        servers = read_nameservers(SYSTEMD_RESOLV) or servers
+    for ns in servers:
         if is_scannable(ns):
             add(around(ns), f"DNS server {ns}")
 
@@ -216,6 +222,32 @@ def discover(known_hosts: list[str] | None = None, prefix: int = 24, exclude: li
     out.sort(key=lambda d: rank.get(d.network, len(rank)))
     for d in out:
         d.reasons = list(dict.fromkeys(d.reasons))
+    return out
+
+
+def explain_empty(known_hosts: list[str] | None = None, route_file: str = "/proc/net/route",
+                  resolv_file: str = "/etc/resolv.conf", container: bool | None = None) -> list[str]:
+    """Why discover() found nothing, source by source, for `expiry ssl networks`."""
+    container = in_container() if container is None else container
+    routes = read_routes(route_file)
+    nets = [str(n) for i, n, _ in routes if n is not None and not i.startswith(SKIP_INTERFACE_PREFIXES)]
+    host_netns = any(i.startswith(("docker", "br-")) for i, _, _ in routes)
+    out = []
+    if container and not host_netns:
+        out.append("routes: this container is on a bridge network, so the server's own subnets are not "
+                   "visible (recreate it with --network host / network_mode: host)")
+    else:
+        out.append("routes: " + (", ".join(nets) + " (none of them private IPv4)" if nets else "none found"))
+    servers = read_nameservers(resolv_file)
+    if servers and all(s.is_loopback for s in servers):
+        servers = read_nameservers(SYSTEMD_RESOLV) or servers
+    shown = ", ".join(map(str, servers)) or "none"
+    hint = (" (a local DNS cache; mount /run/systemd/resolve:/run/systemd/resolve:ro to see the real servers)"
+            if servers and all(s.is_loopback for s in servers) else
+            "" if any(is_scannable(s) for s in servers) else " (none private)")
+    out.append(f"DNS servers: {shown}{hint}")
+    out.append(f"tracked hosts: {len(known_hosts or [])}, none resolving to a private address"
+               if known_hosts else "tracked hosts: none yet")
     return out
 
 

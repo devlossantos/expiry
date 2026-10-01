@@ -104,7 +104,7 @@ def _job_scan(config_path: str | None) -> None:
         if new:
             verb = "now tracked" if added else "not tracked yet (run: expiry ssl scan --add)"
             lines = [f"The weekly certificate scan found {len(new)} new location(s), {verb}:"]
-            lines += [f"{f.location}{f' [{f.name}]' if f.name else ''}: {f.info.common_name or '(no name)'} "
+            lines += [f"{f.described}: {f.info.common_name or '(no name)'} "
                       f"({f.info.issuer}), expires "
                       f"{f.info.not_after:%d/%m/%Y}{' [wildcard]' if sslscan.is_wildcard(f.info) else ''}"
                       for f in new[:50]]

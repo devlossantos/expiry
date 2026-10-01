@@ -926,13 +926,23 @@ expiry ssl scan --domain example.com --wildcards --add         # only wildcards,
    `portal`, `intranet`, ...) under each domain, plus your own names (`--name`, `--names-file`) and the
    public names found in certificate logs (crt.sh). It looks each one up in DNS. On the server that
    means your internal DNS, so internal-only names are found too.
-2. **Subnets (only if you list them):** it goes through every address of each range. It reads the
-   certificate without asking for a name, and if that isn't yours, retries with the address's
-   reverse-DNS name.
+2. **Subnets (listed, or discovered: see `expiry ssl networks`):** it goes through every address of
+   each range. It reads the certificate without asking for a name, and if that isn't yours, retries
+   with the address's reverse-DNS name.
 3. For every address and port (default **443, 8443, 9443**) it opens a TCP connection, does a
-   **TLS handshake, reads the certificate and closes**, the same first step a browser takes. No HTTP request, no login and no
+   **TLS handshake, reads the certificate and closes**, the same first step a browser takes. No login and no
    data is sent. It runs 32 connections in parallel with a 3-second timeout each.
-4. It keeps only certificates **issued for your domains** (name or SAN matches `example.com` or
+4. **Naming what it found on a subnet.** An address alone (`10.1.2.230:443`) doesn't tell you which
+   server needs the new certificate, so for each certificate found on a subnet it works out a name,
+   most trustworthy first: a host name this scan or a tracked entry resolved to that address
+   (**DNS**), the PTR record (**reverse DNS**, often missing on office networks), the host name the
+   web server **redirects** to (most apps send a bare-IP visit to their real URL), and the
+   **certificate's** own host name when it names one server. It also reads the page title (or
+   `Server` header) to say what the device is: `Jira`, `iLO 5`, `Synology DiskStation`. That is a
+   single `GET /`, only to addresses that presented a certificate. The name becomes the tracked
+   entry's label, and an address tracked before it could be named is named by a later scan (a
+   label you set yourself is never overwritten).
+5. It keeps only certificates **issued for your domains** (name or SAN matches `example.com` or
    `*.example.com`) and groups them **by certificate**, so you see every server a wildcard is on.
    Nothing else is recorded: no open ports, no services, no vulnerabilities.
 

@@ -56,7 +56,9 @@ class Found:
     address: str       # IP that answered
     info: CertInfo
     via: str           # "name" | "network" | "logs"
-    name: str = ""     # display name for an address-only find (its reverse-DNS name)
+    name: str = ""     # host name for an address-only find (see identify.py)
+    name_via: str = "" # how that name was found: dns | ptr | redirect | certificate
+    title: str = ""    # what the server says it is: its web page title or Server header
 
     @property
     def external_id(self) -> str:
@@ -66,6 +68,14 @@ class Found:
     def location(self) -> str:
         h = f"[{self.host}]" if ":" in self.host else self.host
         return f"{h}:{self.port}" + (f" ({self.sni})" if self.sni and self.sni != self.host else "")
+
+    @property
+    def described(self) -> str:
+        """The location plus whatever identifies the server: [name] and its page title."""
+        out = self.location
+        if self.name and self.name != self.host and self.name != self.sni:
+            out += f" [{self.name}]"
+        return out + (f" · {self.title}" if self.title else "")
 
 
 @dataclass
@@ -179,8 +189,13 @@ def network_addresses(networks: list[str], limit: int = MAX_NETWORK_TARGETS) -> 
 
 def scan(domains: list[str], names: list[str] | None = None, networks: list[str] | None = None,
          ports: list[int] | None = None, use_logs: bool = True, timeout: float = 3.0, workers: int = 32,
-         resolver=None, reverse=None, match_all: bool = False) -> ScanResult:
-    """match_all: keep every certificate found on `networks`, not only those for `domains`."""
+         resolver=None, reverse=None, match_all: bool = False, known_hosts: list[str] | None = None,
+         http=None) -> ScanResult:
+    """match_all: keep every certificate found on `networks`, not only those for `domains`.
+    known_hosts: names already tracked; with every name this scan resolves, they put a name to an
+    address found on the network (see identify.py)."""
+    from expiry.sources import identify as ident
+
     resolver = resolver or resolve  # looked up at call time (patchable in tests)
     reverse = reverse or reverse_name
     result = ScanResult()
@@ -208,6 +223,18 @@ def scan(domains: list[str], names: list[str] | None = None, networks: list[str]
             return None
         return Found(host, port, "", ip, info, via) if belongs_to(info, doms) else None
 
+    # every address a name resolved to, so a network find can be named (identify.py)
+    extra = [h for h in dict.fromkeys(known_hosts or []) if h not in resolved and not _is_ip(h)]
+    if addresses and extra:
+        with ThreadPoolExecutor(workers) as pool:
+            resolved_extra = dict(zip(extra, pool.map(resolver, extra), strict=True))
+    else:
+        resolved_extra = {}
+    forward: dict[str, list[str]] = {}
+    for host, ips in {**resolved, **resolved_extra}.items():
+        for ip in ips:
+            forward.setdefault(ip, []).append(host.lower().rstrip("."))
+
     # ---- networks: connect without a name; if the certificate isn't ours, retry with the reverse-DNS name
 
     def try_address(task):
@@ -216,18 +243,34 @@ def scan(domains: list[str], names: list[str] | None = None, networks: list[str]
             info = probe(ip, port, "", timeout)
         except Exception:  # noqa: BLE001
             return None
+        ptr_cache: list[str] = []
+
+        def ptr(_ip: str = ip) -> str:
+            if not ptr_cache:
+                ptr_cache.append(reverse(ip))
+            return ptr_cache[0]
+
+        def named(f: Found) -> Found:
+            who = ident.identify(ip, port, f.info, forward, ptr, http, timeout)
+            f.title = who.title
+            if f.sni:  # already reached by its reverse-DNS name
+                f.name, f.name_via = f.sni, "ptr"
+            else:
+                f.name, f.name_via = who.name, who.via
+            return f
+
         if doms and belongs_to(info, doms):
-            return Found(ip, port, "", ip, info, "network")
-        ptr = reverse(ip)
-        if ptr and doms and any(ptr == d or ptr.endswith("." + d) for d in doms):
+            return named(Found(ip, port, "", ip, info, "network"))
+        name = ptr()
+        if name and doms and any(name == d or name.endswith("." + d) for d in doms):
             try:
-                named = probe(ip, port, ptr, timeout)
+                by_ptr = probe(ip, port, name, timeout)
             except Exception:  # noqa: BLE001
-                named = None
-            if named is not None and belongs_to(named, doms):
-                return Found(ip, port, ptr, ip, named, "network")
+                by_ptr = None
+            if by_ptr is not None and belongs_to(by_ptr, doms):
+                return named(Found(ip, port, name, ip, by_ptr, "network"))
         if match_all:
-            return Found(ip, port, "", ip, info, "network", name=ptr)
+            return named(Found(ip, port, "", ip, info, "network"))
         return None
 
     with ThreadPoolExecutor(workers) as pool:
@@ -274,10 +317,17 @@ def track(store, found: list[Found], actor: str, tz, ids: set[str], addresses: s
     """Add found locations as SSL targets (+ their reminders). Returns what was newly added."""
     added = []
     for f in found:
-        if is_tracked(f, ids, addresses) or store.find_ssl_target(f.host, f.port, f.sni):
+        label = scan_label(f)
+        existing = store.find_ssl_target(f.host, f.port, f.sni)
+        if existing is not None and label and not existing.name:
+            # tracked by address before it could be named: name it now (the reminder follows on sync)
+            if store.name_ssl_target(existing.id, label, actor):
+                t = Target(f.host, f.port, f.sni, label, existing.notes)
+                store.upsert_external("ssl", t.external_id, t.label, f.info.not_after.astimezone(tz).date(),
+                                      f.info.meta(), actor, notes=existing.notes)
+        if existing is not None or is_tracked(f, ids, addresses):
             continue
         note = f"found by scan ({f.via})" + (" · wildcard" if is_wildcard(f.info) else "")
-        label = f"SSL {f.name} ({f.host}{'' if f.port == 443 else f':{f.port}'})" if f.name else ""
         store.add_ssl_target(f.host, f.port, f.sni, label, note, actor)
         t = Target(f.host, f.port, f.sni, label, note)
         store.upsert_external("ssl", t.external_id, t.label, f.info.not_after.astimezone(tz).date(),
@@ -286,6 +336,15 @@ def track(store, found: list[Found], actor: str, tz, ids: set[str], addresses: s
         addresses.add((f.address, f.port))
         added.append(f)
     return added
+
+
+def scan_label(f: Found) -> str:
+    """'SSL jira.example.com (10.1.2.230)' for an address found on the network; '' when the
+    address is all there is (the default display name is used then)."""
+    what = f.name or f.title
+    if not what or f.via != "network":
+        return ""
+    return f"SSL {what} ({f.host}{'' if f.port == 443 else f':{f.port}'})"
 
 
 def match_all(opts: dict, domains: list[str]) -> bool:
@@ -332,7 +391,8 @@ def run_scheduled(cfg, store, actor: str = "scan") -> tuple[ScanResult, list[Fou
     warnings: list[str] = []
     networks, discovered = scan_networks(cfg, store, ports, warnings)
     result = scan(domains, names, networks, ports, bool(opts.get("certificate_logs", True)),
-                  float(opts.get("timeout") or 3), match_all=match_all(opts, domains))
+                  float(opts.get("timeout") or 3), match_all=match_all(opts, domains),
+                  known_hosts=[t.host for t in SslSource(cfg, store).targets()])
     result.warnings = warnings + result.warnings
     result.networks = [str(d) for d in discovered]
     ids, addresses = tracked_state(SslSource(cfg, store).targets())

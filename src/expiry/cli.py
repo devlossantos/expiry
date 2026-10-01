@@ -746,6 +746,21 @@ def ssl_discover(app: App, domain: str, do_add: bool, port: int, timeout: float,
     ok(f"Now tracking {len(reachable)} more host(s)")
 
 
+NAME_VIA = {"dns": "DNS", "ptr": "reverse DNS", "redirect": "its redirect", "certificate": "its certificate"}
+
+
+def _location_text(f) -> Text:
+    """ip:port, then the server's name (and how it was found) and what it says it is."""
+    out = Text(f.location)
+    if f.name and f.name not in (f.host, f.sni):
+        out.append("\n" + f.name, style="bold")
+        if f.name_via:
+            out.append(f" (from {NAME_VIA.get(f.name_via, f.name_via)})", style="dim")
+    if f.title:
+        out.append("\n" + f.title, style="italic dim")
+    return out
+
+
 @ssl.command("scan")
 @click.option("-d", "--domain", "domains", multiple=True, metavar="DOMAIN",
               help="Keep certificates issued for this domain (repeatable). Default: sources.ssl.scan.domains.")
@@ -853,7 +868,8 @@ def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_f
     try:
         with console.status(f"Scanning {what} on port(s) {', '.join(map(str, ports_l))} ..."):
             result = sslscan.scan(domains_l, names_l, networks_l, ports_l, use_logs,
-                                  timeout or float(opts.get("timeout") or 3), match_all=keep_all)
+                                  timeout or float(opts.get("timeout") or 3), match_all=keep_all,
+                                  known_hosts=[t.host for t in SslSource(app.cfg, app.store).targets()])
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     result.warnings = pre_warnings + result.warnings
@@ -872,7 +888,7 @@ def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_f
             "issuer": v[0].info.issuer, "expires_on": v[0].info.not_after.date().isoformat(),
             "sha256": k, "san": v[0].info.san,
             "locations": [{"host": f.host, "port": f.port, "sni": f.sni, "address": f.address, "via": f.via,
-                           "name": f.name,
+                           "name": f.name, "name_via": f.name_via, "title": f.title,
                            "tracked": sslscan.is_tracked(f, ids, addresses)} for f in v],
         } for k, v in groups.items()])
         return
@@ -900,7 +916,7 @@ def ssl_scan(app: App, domains: tuple[str, ...], names: tuple[str, ...], names_f
             cert = Text(info.common_name or "-") + (Text(" wildcard", style="magenta") if sslscan.is_wildcard(info) else "")
             t.add_row(cert if j == 0 else "", Text(info.issuer) if j == 0 else "", app.fmt(exp) if j == 0 else "",
                       days_text((exp - ref).days) if j == 0 else "",
-                      Text(f.location + (f" [{f.name}]" if f.name else "")),
+                      _location_text(f),
                       f.via + (f" {f.address}" if f.address != f.host else ""),
                       Text("yes", style="green") if tracked else Text("new", style="yellow"),
                       end_section=j == len(locs) - 1 and i < len(groups) - 1)
@@ -948,7 +964,10 @@ def ssl_networks(app: App, as_json: bool) -> None:
     for w in warnings:
         warn(w)
     if not found:
-        console.print("No private networks found. Add some with sources.ssl.scan.networks.")
+        console.print("No private networks found. What was checked:")
+        for line in netdiscover.explain_empty(known):
+            console.print(f"  [dim]{escape(line)}[/dim]")
+        console.print("Add networks by hand with sources.ssl.scan.networks.")
         return
     t = Table(box=box.SIMPLE_HEAD, pad_edge=False, header_style="bold")
     t.add_column("Network")
@@ -1606,7 +1625,7 @@ def install(target: str, force: bool) -> None:
                   "  1. Edit /etc/expiry/config.yaml and /etc/expiry/expiry.env\n"
                   "  2. Create the backup folder and start the service:\n"
                   "       sudo install -d -o 10001 -g 10001 -m 750 /var/backups/expiry\n"
-                  "       sudo docker run -d --name expiry --restart unless-stopped \\\n"
+                  "       sudo docker run -d --name expiry --restart unless-stopped --network host \\\n"
                   "         --log-opt max-size=10m --log-opt max-file=5 \\\n"
                   "         --env-file /etc/expiry/expiry.env \\\n"
                   "         -v /etc/expiry:/config:ro -v expiry-data:/data \\\n"

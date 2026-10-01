@@ -157,3 +157,22 @@ def test_the_scan_is_on_by_default_and_discovers():
     from expiry.config import DEFAULTS
     scan = DEFAULTS["sources"]["ssl"]["scan"]
     assert scan["enabled"] is True and scan["discover_networks"] is True and scan["match"] == "auto"
+
+
+def test_systemd_resolved_stub_is_looked_through(tmp_path, monkeypatch):
+    """Ubuntu's /etc/resolv.conf says 127.0.0.53; the real DNS servers are in systemd's own file."""
+    r, rc = write(tmp_path, "", "nameserver 127.0.0.53\n")
+    real = tmp_path / "systemd-resolv.conf"
+    real.write_text("nameserver 10.1.1.10\n")
+    monkeypatch.setattr(netdiscover, "SYSTEMD_RESOLV", str(real))
+    found = netdiscover.discover([], route_file=r, resolv_file=rc, container=False)
+    assert nets(found) == ["10.1.1.0/24"]
+
+
+def test_an_empty_result_says_why(tmp_path, monkeypatch):
+    monkeypatch.setattr(netdiscover, "SYSTEMD_RESOLV", str(tmp_path / "missing"))
+    r, rc = write(tmp_path, route("eth0", "172.17.0.0", "255.255.0.0"), "nameserver 127.0.0.53\n")
+    why = netdiscover.explain_empty(["www.example.com"], route_file=r, resolv_file=rc, container=True)
+    assert "bridge network" in why[0] and "--network host" in why[0]
+    assert "127.0.0.53" in why[1] and "/run/systemd/resolve" in why[1]
+    assert "none resolving to a private address" in why[2]

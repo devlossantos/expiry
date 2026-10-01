@@ -101,7 +101,7 @@ def test_ssl_scan_names_from_stdin_and_missing_file(run, monkeypatch):
     from expiry.sources import sslscan
     seen = {}
 
-    def fake_scan(domains, names, networks, ports, use_logs, timeout, match_all=False):
+    def fake_scan(domains, names, networks, ports, use_logs, timeout, match_all=False, **_):
         seen.update(domains=domains, names=names, ports=ports, match_all=match_all)
         return sslscan.ScanResult()
 
